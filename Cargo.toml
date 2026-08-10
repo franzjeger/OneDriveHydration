@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.83"
 
 [workspace.dependencies]
-hydration-client = { git = "https://github.com/franzjeger/HydrationAPI", rev = "b6bb102748648d256de88400ed675f08b0ae1362" }
-hydration-graph = { git = "https://github.com/franzjeger/HydrationAPI", rev = "b6bb102748648d256de88400ed675f08b0ae1362", features = ["http"] }
+hydration-client = { git = "https://github.com/franzjeger/HydrationAPI", rev = "5e4527a5864a9c3f3cf99d97872e459b44a12e85" }
+hydration-graph = { git = "https://github.com/franzjeger/HydrationAPI", rev = "5e4527a5864a9c3f3cf99d97872e459b44a12e85", features = ["http"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
