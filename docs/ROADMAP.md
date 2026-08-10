@@ -13,7 +13,7 @@
 - [x] Device-code enrollment using the shared TokenCache
 - [ ] PKCE/browser enrollment threat-model review
 - [x] Resolve `/me/drive` instead of requiring `--drive-id`
-- [ ] Store credentials through Secret Service/keyring
+- [x] Store credentials through Secret Service/keyring
 - [ ] Live Graph smoke test using a dedicated non-production tenant
 
 ## M2: production transfers
