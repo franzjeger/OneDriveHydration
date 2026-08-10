@@ -8,8 +8,8 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.85"
 
 [workspace.dependencies]
-hydration-client = { git = "https://github.com/franzjeger/HydrationAPI", rev = "9a673eed0f8c13bf8e21dffa0ca7c1498cb5f090" }
-hydration-graph = { git = "https://github.com/franzjeger/HydrationAPI", rev = "9a673eed0f8c13bf8e21dffa0ca7c1498cb5f090", features = ["http"] }
+hydration-client = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "9a673eed0f8c13bf8e21dffa0ca7c1498cb5f090" }
+hydration-graph = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "9a673eed0f8c13bf8e21dffa0ca7c1498cb5f090", features = ["http"] }
 keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
