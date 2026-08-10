@@ -21,7 +21,7 @@
 - [x] Streaming fetch provider with explicit credential-safe redirect handling
 - [ ] Persisted range/resume support
 - [ ] Resumable downloads with persisted progress
-- [ ] Hard-fail QuickXorHash verification
+- [x] Hard-fail QuickXorHash verification
 - [ ] Throttling, offline and restart fault-injection tests
 
 ## M3: Linux product shell

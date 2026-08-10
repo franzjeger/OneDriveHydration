@@ -11,7 +11,7 @@ OneDriveForLinux is a donor and behavioral reference, not a base branch.
 | Device-code presentation | Port behind hydration-graph auth |
 | PKCE browser flow | Adapt after threat-model review |
 | Automatic drive discovery | Port Graph behavior, rewrite transport integration |
-| QuickXorHash | Port algorithm and test vectors with attribution |
+| QuickXorHash | Implemented in HydrationAPI from Microsoft's published algorithm; no donor code |
 | Resumable downloads | Port behavior after the fetch seam streams/ranges |
 | D-Bus, CLI, tray and flyout | Port as product-layer clients |
 | systemd and installers | Adapt after daemon CLI stabilizes |
