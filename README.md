@@ -57,3 +57,16 @@ cargo run -p onedrive-hydration-daemon -- run \
   --state-dir "$HOME/.local/state/onedrive-hydration" \
   --client-id <azure-client-id>
 ```
+
+With the daemon running, query its owner-only control socket or safely return a hydrated file to
+a placeholder:
+
+```text
+cargo run -p onedrive-hydration-daemon --bin onedrive-hydrationctl -- status
+cargo run -p onedrive-hydration-daemon --bin onedrive-hydrationctl -- \
+  evict "Documents/report.pdf"
+```
+
+Both commands use `$XDG_RUNTIME_DIR/onedrive-hydration.ctl`. If the runtime directory is not
+available, pass an explicit `--socket`; the daemon and CLI do not fall back to a shared `/tmp`
+path.

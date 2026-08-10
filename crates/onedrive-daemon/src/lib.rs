@@ -5,10 +5,12 @@ use hydration_graph::{
 };
 use serde::Deserialize;
 use std::fs;
-use std::io;
+use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 const ME_DRIVE: &str = "https://graph.microsoft.com/v1.0/me/drive?$select=id,driveType";
 
@@ -30,6 +32,50 @@ pub fn auth_config(client_id: String) -> AuthConfig {
 }
 
 const CREDENTIAL_SERVICE: &str = "io.github.franzjeger.OneDriveHydration";
+
+pub fn runtime_socket(file_name: &str) -> io::Result<PathBuf> {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "XDG_RUNTIME_DIR is not set; pass --socket explicitly",
+        )
+    })?;
+    let dir = PathBuf::from(dir);
+    if !dir.is_absolute() || !dir.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "XDG_RUNTIME_DIR is not an absolute existing directory",
+        ));
+    }
+    Ok(dir.join(file_name))
+}
+
+pub fn control_request(socket: &Path, command: &str) -> io::Result<String> {
+    if command.is_empty() || command.chars().any(|c| matches!(c, '\n' | '\r' | '\0')) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "control command is empty or contains a forbidden character",
+        ));
+    }
+    let mut stream = UnixStream::connect(socket)?;
+    let timeout = Some(Duration::from_secs(10));
+    stream.set_read_timeout(timeout)?;
+    stream.set_write_timeout(timeout)?;
+    stream.write_all(command.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply)?;
+    if reply.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "the daemon closed the control connection without a reply",
+        ));
+    }
+    Ok(reply
+        .trim_end_matches(|c| matches!(c, '\n' | '\r'))
+        .to_owned())
+}
 
 trait SecretBackend: Send + Sync {
     fn load(&self) -> io::Result<Option<String>>;
@@ -178,6 +224,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::Mutex;
+    use std::thread;
     use std::time::Duration;
 
     #[derive(Default)]
@@ -316,5 +363,38 @@ mod tests {
         assert!(path.exists());
         assert!(store.load().unwrap().is_none());
         assert!(!err.to_string().contains("exposed-refresh"));
+    }
+
+    #[test]
+    fn control_client_sends_one_exact_command_and_reads_multiline_reply() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("control.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut command = String::new();
+            BufReader::new(conn.try_clone().unwrap())
+                .read_line(&mut command)
+                .unwrap();
+            assert_eq!(command, "evict Documents/report final.pdf\n");
+            conn.write_all(b"reclaimed 4096 bytes\nsecond line\n")
+                .unwrap();
+        });
+
+        let reply = control_request(&socket, "evict Documents/report final.pdf").unwrap();
+
+        assert_eq!(reply, "reclaimed 4096 bytes\nsecond line");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn control_client_refuses_command_injection_before_connecting() {
+        for command in ["", "status\nevict secret", "status\r", "status\0"] {
+            let err = control_request(Path::new("/does/not/exist"), command).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        }
     }
 }
