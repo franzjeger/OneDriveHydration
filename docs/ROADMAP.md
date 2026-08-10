@@ -1,0 +1,31 @@
+# Roadmap
+
+## M0: trustworthy skeleton
+
+- [x] Separate repository and Rust workspace
+- [x] Revision-pinned HydrationAPI dependency
+- [x] GraphAccess daemon wiring
+- [x] Formatting, lint, test, docs and dependency-policy CI
+- [ ] Decide public license and add complete license texts before publication
+
+## M1: enroll and identify the account
+
+- [ ] Device-code enrollment using the shared TokenCache
+- [ ] PKCE/browser enrollment threat-model review
+- [ ] Resolve `/me/drive` instead of requiring `--drive-id`
+- [ ] Store credentials through Secret Service/keyring
+- [ ] Live Graph smoke test using a dedicated non-production tenant
+
+## M2: production transfers
+
+- [ ] Streaming/range fetch provider
+- [ ] Resumable downloads with persisted progress
+- [ ] Hard-fail QuickXorHash verification
+- [ ] Throttling, offline and restart fault-injection tests
+
+## M3: Linux product shell
+
+- [ ] D-Bus control surface and CLI
+- [ ] systemd user service and packaging
+- [ ] Tray/flyout and re-authentication UX
+- [ ] Dolphin actions and status overlays

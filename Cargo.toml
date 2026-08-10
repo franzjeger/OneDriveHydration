@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["crates/onedrive-daemon"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.83"
+
+[workspace.dependencies]
+hydration-client = { git = "https://github.com/franzjeger/HydrationAPI", rev = "6b77ceca56d2a32f5dfb8ea15943224ddbcdba2a" }
+hydration-graph = { git = "https://github.com/franzjeger/HydrationAPI", rev = "6b77ceca56d2a32f5dfb8ea15943224ddbcdba2a", features = ["http"] }
