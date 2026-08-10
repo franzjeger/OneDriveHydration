@@ -10,9 +10,9 @@
 
 ## M1: enroll and identify the account
 
-- [ ] Device-code enrollment using the shared TokenCache
+- [x] Device-code enrollment using the shared TokenCache
 - [ ] PKCE/browser enrollment threat-model review
-- [ ] Resolve `/me/drive` instead of requiring `--drive-id`
+- [x] Resolve `/me/drive` instead of requiring `--drive-id`
 - [ ] Store credentials through Secret Service/keyring
 - [ ] Live Graph smoke test using a dedicated non-production tenant
 

@@ -8,3 +8,5 @@ rust-version.workspace = true
 [dependencies]
 hydration-client.workspace = true
 hydration-graph.workspace = true
+serde.workspace = true
+serde_json.workspace = true
