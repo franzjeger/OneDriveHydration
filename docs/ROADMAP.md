@@ -6,7 +6,7 @@
 - [x] Revision-pinned HydrationAPI dependency
 - [x] GraphAccess daemon wiring
 - [x] Formatting, lint, test, docs and dependency-policy CI
-- [ ] Decide public license and add complete license texts before publication
+- [x] Publish the declared MIT OR Apache-2.0 license texts
 
 ## M1: enroll and identify the account
 
