@@ -14,6 +14,12 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
   msrv:
     runs-on: ubuntu-latest
     steps:
