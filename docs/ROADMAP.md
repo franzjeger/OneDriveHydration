@@ -19,15 +19,17 @@
 ## M2: production transfers
 
 - [x] Streaming fetch provider with explicit credential-safe redirect handling
-- [ ] Persisted range/resume support
-- [ ] Resumable downloads with persisted progress
+- [x] In-flight HTTP range/resume support without exposing partial content
+- [x] Resumable downloads with bounded retry and strict Content-Range validation
 - [x] Hard-fail QuickXorHash verification
-- [ ] Throttling, offline and restart fault-injection tests
+- [x] Download throttling and disconnect fault-injection tests
+- [ ] Process-restart fault-injection tests
 
 ## M3: Linux product shell
 
 - [x] Owner-only local status and eviction CLI
 - [ ] D-Bus control surface
-- [ ] systemd user service and packaging
+- [x] Revision-matched Linux binary payload, including privileged helper
+- [ ] Validated systemd installer and units
 - [ ] Tray/flyout and re-authentication UX
 - [ ] Dolphin actions and status overlays

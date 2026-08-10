@@ -14,6 +14,29 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  package-payload:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: franzjeger/HydrationAPI
+          ref: d7f8624f7d57aec4abb752267c0abff9abf59545
+          path: .upstream/hydration-api
+      - uses: dtolnay/rust-toolchain@1.85
+      - name: Install Secret Service build dependency
+        run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev pkg-config
+      - name: Build product binaries
+        run: cargo build --release --locked --workspace
+      - name: Build revision-matched privileged helper
+        working-directory: .upstream/hydration-api
+        run: cargo build --release --locked -p hydrationd --bin hydrationd
+      - name: Verify the complete payload
+        run: |
+          test -x target/release/onedrive-hydration-daemon
+          test -x target/release/onedrive-hydrationctl
+          test -x .upstream/hydration-api/target/release/hydrationd
+
   supply-chain:
     runs-on: ubuntu-latest
     steps:

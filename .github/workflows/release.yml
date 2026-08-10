@@ -1,0 +1,52 @@
+name: Linux release artifact
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  HYDRATION_API_REV: d7f8624f7d57aec4abb752267c0abff9abf59545
+
+jobs:
+  linux-tarball:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: product
+      - uses: actions/checkout@v5
+        with:
+          repository: franzjeger/HydrationAPI
+          ref: ${{ env.HYDRATION_API_REV }}
+          path: hydration-api
+      - uses: dtolnay/rust-toolchain@1.85
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev pkg-config
+      - name: Build unprivileged product binaries
+        working-directory: product
+        run: cargo build --release --locked --workspace
+      - name: Build the revision-matched privileged helper
+        working-directory: hydration-api
+        run: cargo build --release --locked -p hydrationd --bin hydrationd
+      - name: Assemble one auditable product payload
+        run: |
+          install -d payload/bin payload/libexec payload/share/doc/onedrive-hydration
+          install -m 0755 product/target/release/onedrive-hydration-daemon payload/bin/
+          install -m 0755 product/target/release/onedrive-hydrationctl payload/bin/
+          install -m 0755 hydration-api/target/release/hydrationd payload/libexec/
+          install -m 0644 product/README.md product/LICENSE-APACHE product/LICENSE-MIT payload/share/doc/onedrive-hydration/
+          test "$(stat -c '%a' payload/libexec/hydrationd)" = 755
+          tar --owner=0 --group=0 --numeric-owner -czf onedrive-hydration-linux-x86_64.tar.gz -C payload .
+          sha256sum onedrive-hydration-linux-x86_64.tar.gz > onedrive-hydration-linux-x86_64.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: onedrive-hydration-linux-x86_64
+          path: |
+            onedrive-hydration-linux-x86_64.tar.gz
+            onedrive-hydration-linux-x86_64.tar.gz.sha256
+          if-no-files-found: error
