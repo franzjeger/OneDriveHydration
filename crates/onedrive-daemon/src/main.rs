@@ -117,7 +117,7 @@ fn main() -> io::Result<()> {
                 DriveScope::primary(profile.id),
                 &mount,
                 &args.state_dir,
-                TagSource::CTag,
+                TagSource::QuickXor,
                 cache,
             );
             daemon_loop::run(

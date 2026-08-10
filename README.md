@@ -12,8 +12,9 @@ security boundary.
 ## Status
 
 Early integration work. The daemon has device-code enrollment, automatic primary-drive
-discovery, reviewed GraphAccess wiring and constant-memory streamed downloads. Desktop
-integration, resumable ranges and packaging are not yet complete. It is not ready for user data.
+discovery, reviewed GraphAccess wiring, constant-memory streamed downloads and fail-closed
+QuickXorHash verification. Desktop integration, resumable ranges and packaging are not yet
+complete. It is not ready for user data.
 
 ## Design rules
 
