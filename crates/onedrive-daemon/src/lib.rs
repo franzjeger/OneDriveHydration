@@ -72,9 +72,7 @@ pub fn control_request(socket: &Path, command: &str) -> io::Result<String> {
             "the daemon closed the control connection without a reply",
         ));
     }
-    Ok(reply
-        .trim_end_matches(|c| matches!(c, '\n' | '\r'))
-        .to_owned())
+    Ok(reply.trim_end_matches(['\n', '\r']).to_owned())
 }
 
 trait SecretBackend: Send + Sync {
