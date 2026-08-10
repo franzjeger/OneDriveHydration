@@ -1,6 +1,6 @@
 use hydration_client::daemon_loop::{self, Config};
 use hydration_graph::{DriveScope, GraphAccess, GraphHttp, TagSource};
-use onedrive_hydration_daemon::{auth_config, discover_drive, token_cache};
+use onedrive_hydration_daemon::{auth_config, discover_drive, runtime_socket, token_cache};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -53,12 +53,14 @@ fn parse() -> Args {
         _ => usage(),
     };
     let state_dir = PathBuf::from(required("--state-dir"));
-    let socket = value("--socket").map(PathBuf::from).unwrap_or_else(|| {
-        std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("onedrive-hydration.sock")
-    });
+    let socket = value("--socket")
+        .map(PathBuf::from)
+        .map(Ok)
+        .unwrap_or_else(|| runtime_socket("onedrive-hydration.sock"))
+        .unwrap_or_else(|e| {
+            eprintln!("onedrive-hydration-daemon: {e}");
+            usage();
+        });
     Args {
         command,
         state_dir,

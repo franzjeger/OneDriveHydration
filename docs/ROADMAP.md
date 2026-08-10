@@ -26,7 +26,8 @@
 
 ## M3: Linux product shell
 
-- [ ] D-Bus control surface and CLI
+- [x] Owner-only local status and eviction CLI
+- [ ] D-Bus control surface
 - [ ] systemd user service and packaging
 - [ ] Tray/flyout and re-authentication UX
 - [ ] Dolphin actions and status overlays
