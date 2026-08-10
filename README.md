@@ -11,10 +11,10 @@ security boundary.
 
 ## Status
 
-Early integration work. The daemon has device-code enrollment, automatic primary-drive
-discovery, reviewed GraphAccess wiring, constant-memory streamed downloads and fail-closed
-QuickXorHash verification. Desktop integration, resumable ranges and packaging are not yet
-complete. It is not ready for user data.
+Early integration work. The daemon has device-code enrollment backed by Linux Secret Service,
+automatic primary-drive discovery, reviewed GraphAccess wiring, constant-memory streamed
+downloads and fail-closed QuickXorHash verification. Desktop integration, resumable ranges and
+packaging are not yet complete. It is not ready for user data.
 
 ## Design rules
 
@@ -35,7 +35,13 @@ Licensed under either [Apache License, Version 2.0](LICENSE-APACHE) or
 
 ## Current development invocation
 
-Enroll once; the refresh token is stored in a private state directory:
+Enroll once; the refresh token is stored in the desktop's Linux Secret Service collection.
+The command fails closed when no Secret Service provider is available or the collection cannot
+be unlocked; it never falls back to a plaintext token file.
+
+On first start after upgrading from the file-backed alpha, an existing `refresh-token` file in
+the state directory is migrated into Secret Service and removed only after the secure write
+succeeds. A migration error stops startup.
 
 ```text
 cargo run -p onedrive-hydration-daemon -- auth \

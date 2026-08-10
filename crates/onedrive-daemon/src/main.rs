@@ -73,10 +73,7 @@ fn auth_error(action: &'static str) -> impl FnOnce(hydration_graph::auth::AuthEr
 
 fn main() -> io::Result<()> {
     let args = parse();
-    let cache = token_cache(
-        auth_config(args.client_id),
-        &args.state_dir.join("refresh-token"),
-    );
+    let cache = token_cache(auth_config(args.client_id), &args.state_dir)?;
     match args.command {
         Command::Auth => {
             if cache.resume()? {

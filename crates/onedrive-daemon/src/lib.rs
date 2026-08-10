@@ -1,10 +1,12 @@
-use hydration_graph::auth::{AuthConfig, TokenCache};
+use hydration_graph::auth::{AuthConfig, CredentialStore, RefreshToken, TokenCache};
 use hydration_graph::{
     DriveId, FileCredentialStore, GraphTokens, Method, MonotonicClock, Reply, Request,
-    SharedTokenCache, Transport,
+    SharedCredentialStore, SharedTokenCache, Transport,
 };
 use serde::Deserialize;
+use std::fs;
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -27,13 +29,109 @@ pub fn auth_config(client_id: String) -> AuthConfig {
     AuthConfig::public_client(client_id).with_scopes(["Files.ReadWrite.All", "User.Read"])
 }
 
-pub fn token_cache(config: AuthConfig, credential: &Path) -> SharedTokenCache {
-    Arc::new(TokenCache::new(
+const CREDENTIAL_SERVICE: &str = "io.github.franzjeger.OneDriveHydration";
+
+trait SecretBackend: Send + Sync {
+    fn load(&self) -> io::Result<Option<String>>;
+    fn save(&self, value: &str) -> io::Result<()>;
+}
+
+struct KeyringBackend(keyring::Entry);
+
+impl KeyringBackend {
+    fn new(user: &str) -> io::Result<Self> {
+        keyring::Entry::new(CREDENTIAL_SERVICE, user)
+            .map(Self)
+            .map_err(|_| secret_service_error("could not connect to Linux Secret Service"))
+    }
+}
+
+impl SecretBackend for KeyringBackend {
+    fn load(&self) -> io::Result<Option<String>> {
+        match self.0.get_password() {
+            Ok(value) => Ok(Some(value)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(_) => Err(secret_service_error(
+                "could not read the OneDrive credential from Linux Secret Service",
+            )),
+        }
+    }
+
+    fn save(&self, value: &str) -> io::Result<()> {
+        self.0.set_password(value).map_err(|_| {
+            secret_service_error(
+                "could not persist the rotated OneDrive credential in Linux Secret Service",
+            )
+        })
+    }
+}
+
+struct SecretServiceCredentialStore<B>(B);
+
+impl<B: SecretBackend> CredentialStore for SecretServiceCredentialStore<B> {
+    fn load(&self) -> io::Result<Option<RefreshToken>> {
+        self.0.load().map(|value| value.map(RefreshToken::new))
+    }
+
+    fn save(&self, refresh: &RefreshToken) -> io::Result<()> {
+        self.0.save(refresh.expose_for_storage())
+    }
+}
+
+fn secret_service_error(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, message)
+}
+
+pub fn token_cache(config: AuthConfig, state_dir: &Path) -> io::Result<SharedTokenCache> {
+    // Isolate credentials created for different Azure app registrations. The
+    // client id is public configuration, not a secret.
+    let user = format!("refresh-token:{}", config.client_id());
+    let store: SharedCredentialStore =
+        Arc::new(SecretServiceCredentialStore(KeyringBackend::new(&user)?));
+    migrate_legacy_credential(store.as_ref(), &state_dir.join("refresh-token"))?;
+    Ok(Arc::new(TokenCache::new(
         config,
         Arc::new(GraphTokens::new()),
         MonotonicClock,
-        FileCredentialStore::new(credential),
-    ))
+        store,
+    )))
+}
+
+fn migrate_legacy_credential(store: &dyn CredentialStore, legacy_path: &Path) -> io::Result<()> {
+    let legacy = FileCredentialStore::new(legacy_path);
+    let secure_exists = store.load()?.is_some();
+    if !secure_exists {
+        if legacy_path.exists() {
+            let metadata = fs::symlink_metadata(legacy_path)?;
+            if !metadata.file_type().is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.permissions().mode() & 0o077 != 0
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "legacy credential is not a private regular file",
+                ));
+            }
+        }
+        if let Some(refresh) = legacy.load()? {
+            store.save(&refresh)?;
+        } else {
+            return Ok(());
+        }
+    } else if !legacy_path.exists() {
+        return Ok(());
+    }
+
+    // The secure write above completed before plaintext removal. Failing to
+    // remove or durably record the removal is an error, not a silent warning.
+    fs::remove_file(legacy_path)?;
+    let parent = legacy_path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "legacy credential path has no parent",
+        )
+    })?;
+    fs::File::open(parent)?.sync_all()
 }
 
 pub fn discover_drive(transport: &mut impl Transport) -> io::Result<DriveProfile> {
@@ -79,7 +177,22 @@ fn parse_drive_reply(reply: Reply) -> io::Result<DriveProfile> {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::sync::Mutex;
     use std::time::Duration;
+
+    #[derive(Default)]
+    struct MemorySecret(Mutex<Option<String>>);
+
+    impl SecretBackend for MemorySecret {
+        fn load(&self) -> io::Result<Option<String>> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+
+        fn save(&self, value: &str) -> io::Result<()> {
+            *self.0.lock().unwrap() = Some(value.to_owned());
+            Ok(())
+        }
+    }
 
     struct Wire {
         replies: VecDeque<Reply>,
@@ -136,5 +249,72 @@ mod tests {
         let secret = "do-not-log-this-body";
         let err = parse_drive_reply(reply(401, secret)).unwrap_err();
         assert!(!err.to_string().contains(secret));
+    }
+
+    #[test]
+    fn secret_service_adapter_round_trips_rotated_credentials() {
+        let store = SecretServiceCredentialStore(MemorySecret::default());
+        store.save(&RefreshToken::new("rotated-refresh")).unwrap();
+        let loaded = store.load().unwrap().unwrap();
+        assert_eq!(loaded.expose_for_storage(), "rotated-refresh");
+    }
+
+    #[test]
+    fn missing_secret_is_signed_out_not_an_empty_credential() {
+        let store = SecretServiceCredentialStore(MemorySecret::default());
+        assert!(store.load().unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_file_is_removed_only_after_secure_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("refresh-token");
+        FileCredentialStore::new(&path)
+            .save(&RefreshToken::new("legacy-refresh"))
+            .unwrap();
+        let store = SecretServiceCredentialStore(MemorySecret::default());
+
+        migrate_legacy_credential(&store, &path).unwrap();
+
+        assert!(!path.exists());
+        assert_eq!(
+            store.load().unwrap().unwrap().expose_for_storage(),
+            "legacy-refresh"
+        );
+    }
+
+    #[test]
+    fn secure_credential_wins_over_stale_legacy_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("refresh-token");
+        FileCredentialStore::new(&path)
+            .save(&RefreshToken::new("stale-legacy"))
+            .unwrap();
+        let store = SecretServiceCredentialStore(MemorySecret::default());
+        store.save(&RefreshToken::new("secure-current")).unwrap();
+
+        migrate_legacy_credential(&store, &path).unwrap();
+
+        assert!(!path.exists());
+        assert_eq!(
+            store.load().unwrap().unwrap().expose_for_storage(),
+            "secure-current"
+        );
+    }
+
+    #[test]
+    fn permissive_legacy_file_is_refused_without_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("refresh-token");
+        fs::write(&path, "exposed-refresh").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let store = SecretServiceCredentialStore(MemorySecret::default());
+
+        let err = migrate_legacy_credential(&store, &path).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(path.exists());
+        assert!(store.load().unwrap().is_none());
+        assert!(!err.to_string().contains("exposed-refresh"));
     }
 }
