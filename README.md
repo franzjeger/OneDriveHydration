@@ -28,6 +28,11 @@ complete. It is not ready for user data.
 See [the architecture](docs/ARCHITECTURE.md), [migration map](docs/MIGRATION.md),
 [security model](docs/SECURITY.md), and [roadmap](docs/ROADMAP.md).
 
+## License
+
+Licensed under either [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT](LICENSE-MIT), at your option.
+
 ## Current development invocation
 
 Enroll once; the refresh token is stored in a private state directory:
