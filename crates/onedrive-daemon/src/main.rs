@@ -1,16 +1,20 @@
 use hydration_client::daemon_loop::{self, Config};
-use hydration_graph::auth::AuthConfig;
-use hydration_graph::{DriveId, DriveScope, GraphAccess, TagSource};
+use hydration_graph::{DriveScope, GraphAccess, GraphHttp, TagSource};
+use onedrive_hydration_daemon::{auth_config, discover_drive, token_cache};
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
+enum Command {
+    Auth,
+    Run { mount: PathBuf },
+}
+
 struct Args {
-    mount: PathBuf,
+    command: Command,
     state_dir: PathBuf,
-    drive_id: DriveId,
     client_id: String,
-    credential: PathBuf,
     socket: PathBuf,
 }
 
@@ -33,63 +37,97 @@ fn required(name: &str) -> String {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: onedrive-hydration-daemon --mount <path> --state-dir <path> \
-         --drive-id <id> --client-id <uuid> [--credential <path>] [--socket <path>]"
+        "usage:\n  onedrive-hydration-daemon auth --state-dir <path> --client-id <uuid>\n  \
+         onedrive-hydration-daemon run --mount <path> --state-dir <path> --client-id <uuid> \
+         [--socket <path>]"
     );
     std::process::exit(2)
 }
 
-fn parse() -> io::Result<Args> {
-    if std::env::args().any(|arg| matches!(arg.as_str(), "-h" | "--help")) {
-        usage();
-    }
-    let mount = PathBuf::from(required("--mount"));
+fn parse() -> Args {
+    let command = match std::env::args().nth(1).as_deref() {
+        Some("auth") => Command::Auth,
+        Some("run") => Command::Run {
+            mount: PathBuf::from(required("--mount")),
+        },
+        _ => usage(),
+    };
     let state_dir = PathBuf::from(required("--state-dir"));
-    let drive_id = DriveId::parse(&required("--drive-id"))
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid --drive-id"))?;
-    let credential = value("--credential")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| state_dir.join("refresh-token"));
     let socket = value("--socket").map(PathBuf::from).unwrap_or_else(|| {
         std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join("onedrive-hydration.sock")
     });
-    Ok(Args {
-        mount,
+    Args {
+        command,
         state_dir,
-        drive_id,
         client_id: required("--client-id"),
-        credential,
         socket,
-    })
+    }
+}
+
+fn auth_error(action: &'static str) -> impl FnOnce(hydration_graph::auth::AuthError) -> io::Error {
+    move |_| io::Error::new(io::ErrorKind::PermissionDenied, action)
 }
 
 fn main() -> io::Result<()> {
-    let args = parse()?;
-    if !args.mount.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "the sync mount directory does not exist",
-        ));
-    }
-    let auth =
-        AuthConfig::public_client(args.client_id).with_scopes(["Files.ReadWrite.All", "User.Read"]);
-    let access = GraphAccess::new(
-        DriveScope::primary(args.drive_id),
-        &args.mount,
-        &args.state_dir,
-        args.credential,
-        auth,
-        TagSource::CTag,
+    let args = parse();
+    let cache = token_cache(
+        auth_config(args.client_id),
+        &args.state_dir.join("refresh-token"),
     );
-    daemon_loop::run(
-        Config {
-            mount: args.mount,
-            socket: args.socket,
-            debounce: Duration::from_secs(900),
-        },
-        access,
-    )
+    match args.command {
+        Command::Auth => {
+            if cache.resume()? {
+                println!("Already signed in.");
+                return Ok(());
+            }
+            let code = cache
+                .begin_device_code()
+                .map_err(auth_error("device-code enrollment could not be started"))?;
+            println!("Open {}", code.verification_uri());
+            println!("Enter code: {}", code.user_code());
+            cache
+                .complete_device_code(&code)
+                .map_err(auth_error("device-code enrollment did not complete"))?;
+            println!("Sign-in completed and the rotated credential was stored.");
+            Ok(())
+        }
+        Command::Run { mount } => {
+            if !mount.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "the sync mount directory does not exist",
+                ));
+            }
+            if !cache.resume()? {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "not signed in; run the auth command first",
+                ));
+            }
+            let profile = discover_drive(&mut GraphHttp::new(Arc::clone(&cache)))?;
+            eprintln!(
+                "onedrive-hydration-daemon: drive={} type={}",
+                profile.id.as_str(),
+                profile.drive_type
+            );
+            let access = GraphAccess::with_token_cache(
+                DriveScope::primary(profile.id),
+                &mount,
+                &args.state_dir,
+                TagSource::CTag,
+                cache,
+            );
+            daemon_loop::run(
+                Config {
+                    mount,
+                    socket: args.socket,
+                    debounce: Duration::from_secs(900),
+                },
+                access,
+            )
+        }
+    }
 }

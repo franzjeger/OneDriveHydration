@@ -11,8 +11,8 @@ security boundary.
 
 ## Status
 
-Early integration work. The daemon is wired to the reviewed GraphAccess implementation,
-but enrollment, automatic drive discovery, desktop integration and packaging are not yet
+Early integration work. The daemon has device-code enrollment, automatic primary-drive
+discovery and reviewed GraphAccess wiring. Desktop integration and packaging are not yet
 complete. It is not ready for user data.
 
 ## Design rules
@@ -29,13 +29,19 @@ See [the architecture](docs/ARCHITECTURE.md), [migration map](docs/MIGRATION.md)
 
 ## Current development invocation
 
-The current preflight deliberately refuses to start without an externally enrolled refresh
-token:
+Enroll once; the refresh token is stored in a private state directory:
 
 ```text
-cargo run -p onedrive-hydration-daemon -- \
+cargo run -p onedrive-hydration-daemon -- auth \
+  --state-dir "$HOME/.local/state/onedrive-hydration" \
+  --client-id <azure-client-id>
+```
+
+Then start the daemon. The signed-in user's primary drive ID is resolved automatically:
+
+```text
+cargo run -p onedrive-hydration-daemon -- run \
   --mount "$HOME/OneDrive" \
   --state-dir "$HOME/.local/state/onedrive-hydration" \
-  --client-id <azure-client-id> \
-  --drive-id <microsoft-graph-drive-id>
+  --client-id <azure-client-id>
 ```
