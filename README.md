@@ -70,3 +70,18 @@ cargo run -p onedrive-hydration-daemon --bin onedrive-hydrationctl -- \
 Both commands use `$XDG_RUNTIME_DIR/onedrive-hydration.ctl`. If the runtime directory is not
 available, pass an explicit `--socket`; the daemon and CLI do not fall back to a shared `/tmp`
 path.
+
+For desktop integration there is a session D-Bus service that mirrors the control socket, so a
+tray can subscribe instead of polling and never needs to know the socket exists:
+
+```text
+cargo run -p onedrive-hydration-daemon --bin onedrive-hydration-dbus
+```
+
+It owns `io.github.franzjeger.OneDriveHydration` and serves, at the object path of the same
+name, `DaemonRunning`, `Unsent`, `Excluded` and `Exposures` properties, an `Evict(path)`
+method with named errors, and a `StateChanged` signal that fires once per distinct state.
+While the daemon is down the service keeps running and reports `DaemonRunning` false; when the
+daemon restarts it reconnects on its own with bounded backoff. Eviction over the bus is held
+to the same boundary as the socket: callers whose uid the bus cannot attribute to the daemon's
+owner are refused.

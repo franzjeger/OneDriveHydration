@@ -6,11 +6,17 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+blocking.workspace = true
 hydration-client.workspace = true
 hydration-graph.workspace = true
 keyring.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+zbus.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+# The peer-to-peer feature exists so the D-Bus surface can be exercised over a
+# socketpair in tests; released binaries speak only to the session bus.
+zbus = { workspace = true, features = ["p2p"] }

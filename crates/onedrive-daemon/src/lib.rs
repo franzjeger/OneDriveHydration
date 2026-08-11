@@ -1,3 +1,5 @@
+pub mod dbus;
+
 use hydration_graph::auth::{AuthConfig, CredentialStore, RefreshToken, TokenCache};
 use hydration_graph::{
     DriveId, FileCredentialStore, GraphTokens, Method, MonotonicClock, Reply, Request,

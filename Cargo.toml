@@ -8,8 +8,14 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.85"
 
 [workspace.dependencies]
+blocking = "1"
 hydration-client = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "d7f8624f7d57aec4abb752267c0abff9abf59545" }
 hydration-graph = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "d7f8624f7d57aec4abb752267c0abff9abf59545", features = ["http"] }
 keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
+rustix = { version = "1", features = ["process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Newest zbus whose tree still builds on this workspace's rust-version;
+# 5.14.0 and later require Rust 1.87. Its zvariant/zbus_names/zvariant_utils
+# companions are held back in Cargo.lock for the same reason.
+zbus = { version = "=5.13.2", default-features = false, features = ["async-io", "blocking-api"] }

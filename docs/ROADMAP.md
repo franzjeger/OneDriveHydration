@@ -28,7 +28,7 @@
 ## M3: Linux product shell
 
 - [x] Owner-only local status and eviction CLI
-- [ ] D-Bus control surface
+- [x] D-Bus control surface
 - [x] Revision-matched Linux binary payload, including privileged helper
 - [ ] Validated systemd installer and units
 - [ ] Tray/flyout and re-authentication UX
