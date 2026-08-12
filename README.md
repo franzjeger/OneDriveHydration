@@ -85,3 +85,21 @@ While the daemon is down the service keeps running and reports `DaemonRunning` f
 daemon restarts it reconnects on its own with bounded backoff. Eviction over the bus is held
 to the same boundary as the socket: callers whose uid the bus cannot attribute to the daemon's
 owner are refused.
+
+The tray icon subscribes to exactly that signal — it never polls:
+
+```text
+cargo run -p onedrive-hydration-daemon --bin onedrive-hydration-tray -- \
+  --mount "$HOME/OneDrive"
+```
+
+It is a StatusNotifierItem with a DBusMenu, spoken directly over zbus with no GUI toolkit:
+the panel draws everything. Four states are shown, in order of precedence: daemon (or state
+service) not running, another mount exposing the sync files (`Exposures > 0`, rendered as
+`NeedsAttention` because reads through such a mount bypass hydration), changes waiting to
+upload, and up to date. Icons resolve by name from the hicolor theme; run
+`packaging/icons/install-icons.sh` once per user to install them. On a desktop with no
+`org.kde.StatusNotifierWatcher` the binary exits saying so, and when the watcher restarts —
+plasmashell and kded6 do — it re-registers by itself. Eviction is deliberately absent from
+the menu: it needs a file picker, which needs a toolkit, which is the flyout's decision to
+make.
