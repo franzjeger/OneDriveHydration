@@ -211,10 +211,12 @@ fn secret_service_sight(connection: &mut Option<zbus::blocking::Connection>) -> 
 /// for it — and says so, once, rather than exiting with an error a reader
 /// cannot tell from a missing credential.
 ///
-/// A store that answers "no such credential" is *not* waited for: `NoEntry`
-/// is an authoritative answer (see [`SecretBackend::load`]), and papering
+/// A store that answers "no such credential" is *not* waited for: `NoEntry` is
+/// an authoritative answer — the store is up and it has looked — and papering
 /// over it here would turn "you need to sign in" into a silent minute of
-/// nothing.
+/// nothing. The lookup itself is `SecretBackend::load`, which is private, so
+/// this names it in prose rather than linking to it; a doc link to a private
+/// item fails `cargo doc -D warnings`, which CI runs.
 pub fn wait_for_secret_service(bound: Duration) -> io::Result<()> {
     let mut connection = None;
     wait_for_store(
