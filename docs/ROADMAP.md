@@ -32,5 +32,6 @@
 - [x] Revision-matched Linux binary payload, including privileged helper
 - [x] Validated systemd installer and units
 - [x] StatusNotifierItem tray icon and menu, signal-driven
-- [ ] Flyout and re-authentication UX
+- [x] Flyout: system-tray plasmoid with eviction, signal-driven
+- [ ] Re-authentication UX (needs credential state on the D-Bus surface first)
 - [ ] Dolphin actions and status overlays

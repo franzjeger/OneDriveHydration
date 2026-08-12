@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+      http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+    <kcfgfile name=""/>
+    <group name="General">
+        <!-- The sync root, for "Open OneDrive Folder" and for deciding which
+             picked files are eligible for eviction. The daemon knows its
+             mount but the D-Bus surface does not expose it, so the flyout is
+             told the same way the tray binary is told with double-dash-mount.
+             Empty means ~/OneDrive, the path the deployment documents. -->
+        <entry name="mountPath" type="String">
+            <label>Path of the OneDrive sync folder.</label>
+            <default></default>
+        </entry>
+    </group>
+</kcfg>

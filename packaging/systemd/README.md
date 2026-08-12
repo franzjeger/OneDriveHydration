@@ -30,9 +30,10 @@ tmpfs is called out by name); another mount exposes the same files (DESIGN.md
 bus (enrollment fails closed without it); a payload binary the units point at
 is missing; the named user does not resolve; the installer itself is running in
 a private mount namespace (its answers would describe the sandbox, not the
-machine); an existing unit differs from what would be generated (`--force` to
-overwrite); or — checked in the generated text, not assumed from the templates —
-a helper unit carries any namespace-creating directive.
+machine); an existing generated file — a unit or the D-Bus activation file —
+differs from what would be generated (`--force` to overwrite); or — checked in
+the generated text, not assumed from the templates — a helper unit carries any
+namespace-creating directive.
 
 Every one of those refusals is exercised in `crates/installer/tests/refusals.rs`,
 including the namespace scan against a deliberately poisoned template. A
@@ -49,6 +50,50 @@ is required, and it is public configuration, never a secret.
 files land under the prefix, no command is ever executed. `render` prints the
 units for review, and for diffing a deployed set against what the current
 version generates.
+
+## The user half: three surfaces, three different triggers
+
+The sync daemon, the D-Bus state service and the tray are one product but
+three lifecycles, and the units say so instead of sharing one `WantedBy=`:
+
+- **`onedrive-hydration.service`** starts with `default.target` — it must run
+  in any session that can reach the mount, graphical or not. It is
+  deliberately *not* ordered after the credential store, because that cannot
+  be expressed: on the verified deployment `org.freedesktop.secrets` is owned
+  by `ksecretd`, which PAM starts inside the login session's scope
+  (`UserUnit=n/a`, so there is no user unit to name in `After=`), and the name
+  is not activatable, so the bus cannot summon it either. Measured at login
+  2026-08-12: this unit started with `default.target` at t=20.7s and failed;
+  the store appeared at t=25.8s; the `Restart=on-failure` retry at t=25.7s
+  succeeded — recovery by luck, logged as `PermissionDenied … could not read
+  the OneDrive credential`, indistinguishable from a lost credential. An
+  `After=` against a job outside the unit's own start transaction orders
+  nothing, so the *daemon* closes the gap: at startup it waits — bounded,
+  sixty seconds — for the name to be owned or activatable, and its messages
+  distinguish "the store is not up yet" (an outage; do not re-enroll) from
+  "there is no credential" (sign in).
+
+- **`onedrive-hydration-dbus.service`** is enabled nowhere: it is
+  D-Bus-activated. The installer writes an activation file to
+  `~/.local/share/dbus-1/services/` whose `SystemdService=` names the unit, so
+  the first thing that talks to `io.github.franzjeger.OneDriveHydration` — the
+  tray's initial cold property read, a `busctl introspect`, the future
+  flyout — starts it, and a session with no subscriber runs no state service
+  at all. Activation is what the bus is for: the activating call is queued
+  until the name is up, so the first caller sees a slow reply, never a missing
+  one. `Type=dbus` ties readiness to name acquisition, and `Restart=on-failure`
+  covers crashes only — a stopped sync daemon is a *reported state*
+  (`DaemonRunning=false`), not a failure of this service.
+
+- **`onedrive-hydration-tray.service`** needs a graphical session and nothing
+  else: `WantedBy=graphical-session.target`, with `After=` and `PartOf=` the
+  same, so it starts when a session exists and stops with it. Started earlier
+  it would find no `org.kde.StatusNotifierWatcher` and exit, by its own
+  design — correct behaviour at the wrong moment. Even at the right moment the
+  watcher can lag (on the verified desktop it belongs to kded6, started around
+  the same target), so the unit retries on a five-second spacing and gives up
+  after ~ten attempts: a desktop that will never show a tray gets one visibly
+  failed unit, not an all-session respawn loop.
 
 Uninstall makes one promise that outranks tidiness: `hydrationd` is never left
 stopped — or deleted — while the sync root is still mounted, because a marked

@@ -15,8 +15,9 @@ Early integration work. The daemon has device-code enrollment backed by Linux Se
 automatic primary-drive discovery, reviewed GraphAccess wiring, constant-memory streamed
 downloads and fail-closed QuickXorHash verification, a D-Bus state service and tray, and a
 validated systemd installer that refuses deployments which would fail open
-(see [packaging/systemd](packaging/systemd/README.md)). The flyout and re-authentication UX
-and Dolphin integration are not yet built. It is not ready for user data.
+(see [packaging/systemd](packaging/systemd/README.md)), and a Plasma flyout plasmoid with
+eviction. The re-authentication UX and Dolphin integration are not yet built. It is not
+ready for user data.
 
 ## Design rules
 
@@ -112,3 +113,16 @@ upload, and up to date. Icons resolve by name from the hicolor theme; run
 plasmashell and kded6 do — it re-registers by itself. Eviction is deliberately absent from
 the menu: it needs a file picker, which needs a toolkit, which is the flyout's decision to
 make.
+
+On Plasma 6 the flyout exists, and it made the opposite trade the same way: a plasmoid —
+QML loaded by plasmashell's system tray, shipped as data with zero new Rust dependencies —
+instead of a toolkit. Install it per user with `packaging/plasmoid/install-plasmoid.sh`
+(icons first, as above); the running shell adopts it into the system tray by itself. It
+subscribes to the same `StateChanged` signal, shows the same states with the same wording —
+a test pins the two surfaces together — and adds the two actions the tray could not draw:
+opening the sync folder, and "Free Up Space…", which picks a file under the mount and calls
+`Evict`, quoting the daemon's refusal reason verbatim when it declines. On Plasma the
+plasmoid *is* the tray presence; running the SNI binary alongside it shows a second icon,
+so keep that one for desktops without plasmashell. What the flyout does not show is what
+the D-Bus surface cannot yet say — account, quota, per-file transfers, byte totals,
+credential health — and `packaging/plasmoid/README.md` keeps that list honestly.

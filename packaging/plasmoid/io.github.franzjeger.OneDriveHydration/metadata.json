@@ -1,0 +1,22 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "Frank"
+            }
+        ],
+        "Category": "System Information",
+        "Description": "OneDrive sync state, exposure warnings, and space reclaim",
+        "EnabledByDefault": true,
+        "Icon": "onedrive-hydration",
+        "Id": "io.github.franzjeger.OneDriveHydration",
+        "License": "MIT OR Apache-2.0",
+        "Name": "OneDrive Hydration",
+        "Version": "0.1.0"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-Plasma-MainScript": "ui/main.qml",
+    "X-Plasma-NotificationArea": "true",
+    "X-Plasma-NotificationAreaCategory": "ApplicationStatus"
+}
