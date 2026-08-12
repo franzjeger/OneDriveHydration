@@ -89,27 +89,193 @@ impl KeyringBackend {
     fn new(user: &str) -> io::Result<Self> {
         keyring::Entry::new(CREDENTIAL_SERVICE, user)
             .map(Self)
-            .map_err(|_| secret_service_error("could not connect to Linux Secret Service"))
+            .map_err(|e| {
+                secret_service_error(format!("could not connect to Linux Secret Service: {e}"))
+            })
     }
 }
 
+// The keyring error is kept in every message below. It never carries secret
+// material — read failures have no secret to quote, and the write errors
+// describe the store, not the value — and discarding it once made a login
+// race ("the object does not exist yet") indistinguishable in the journal
+// from a corrupted store. Print what actually happened.
 impl SecretBackend for KeyringBackend {
     fn load(&self) -> io::Result<Option<String>> {
         match self.0.get_password() {
             Ok(value) => Ok(Some(value)),
+            // Authoritative: the store answered, and the answer is "no such
+            // credential". Mapped to None — signed out — never to an error,
+            // and never retried; only a store that *cannot answer* is worth
+            // waiting for (see [`wait_for_secret_service`]).
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err(secret_service_error(
-                "could not read the OneDrive credential from Linux Secret Service",
-            )),
+            Err(e) => Err(secret_service_error(format!(
+                "could not read the OneDrive credential from Linux Secret Service: {e}"
+            ))),
         }
     }
 
     fn save(&self, value: &str) -> io::Result<()> {
-        self.0.set_password(value).map_err(|_| {
-            secret_service_error(
-                "could not persist the rotated OneDrive credential in Linux Secret Service",
-            )
+        self.0.set_password(value).map_err(|e| {
+            secret_service_error(format!(
+                "could not persist the rotated OneDrive credential in Linux Secret Service: {e}"
+            ))
         })
+    }
+}
+
+/// The well-known name of the credential store, fixed by the freedesktop
+/// Secret Service specification.
+pub const SECRET_SERVICE_BUS_NAME: &str = "org.freedesktop.secrets";
+
+/// How long [`wait_for_secret_service`] is willing to wait. The race it
+/// covers was measured at ~5s (see [`wait_for_secret_service`]); a minute
+/// absorbs a slow desktop several times over while still turning a genuinely
+/// absent store into a precise error within the first restart cycle or two.
+pub const SECRET_SERVICE_WAIT: Duration = Duration::from_secs(60);
+
+/// How often the wait looks again. Half a second keeps the measured ~5s race
+/// from costing more than it must, and sixty seconds of half-second glances
+/// at the bus driver cost nothing anyone can observe.
+const STORE_POLL: Duration = Duration::from_millis(500);
+
+/// One glance at the session bus: could the credential store answer a call
+/// right now?
+enum StoreSight {
+    /// It could — the name is owned, or the bus can activate it (in which
+    /// case the first real call starts it and is queued until it is up).
+    Present(&'static str),
+    /// It could not, and here is exactly what was seen instead.
+    Absent(String),
+}
+
+fn secret_service_sight(connection: &mut Option<zbus::blocking::Connection>) -> StoreSight {
+    let conn = match connection {
+        Some(conn) => conn,
+        None => match zbus::blocking::Connection::session() {
+            Ok(conn) => connection.insert(conn),
+            Err(e) => {
+                return StoreSight::Absent(format!("could not connect to the session bus: {e}"))
+            }
+        },
+    };
+    let Ok(name) = zbus::names::BusName::try_from(SECRET_SERVICE_BUS_NAME) else {
+        // A constant that stopped parsing is a build defect; there is no
+        // point retrying it, but failing closed with the reason beats a
+        // panic in a daemon.
+        return StoreSight::Absent(format!("{SECRET_SERVICE_BUS_NAME} is not a valid bus name"));
+    };
+    let fdo = match zbus::blocking::fdo::DBusProxy::new(conn) {
+        Ok(fdo) => fdo,
+        Err(e) => {
+            *connection = None;
+            return StoreSight::Absent(format!("could not reach the bus driver: {e}"));
+        }
+    };
+    match fdo.name_has_owner(name) {
+        Ok(true) => return StoreSight::Present("owned"),
+        Ok(false) => {}
+        Err(e) => {
+            // The connection may be the casualty; rebuild it next glance.
+            *connection = None;
+            return StoreSight::Absent(format!(
+                "the bus could not say whether {SECRET_SERVICE_BUS_NAME} is owned: {e}"
+            ));
+        }
+    }
+    match fdo.list_activatable_names() {
+        Ok(names) if names.iter().any(|n| n.as_str() == SECRET_SERVICE_BUS_NAME) => {
+            StoreSight::Present("activatable")
+        }
+        Ok(_) => StoreSight::Absent(format!(
+            "{SECRET_SERVICE_BUS_NAME} has no owner and is not activatable on the session bus"
+        )),
+        Err(e) => {
+            *connection = None;
+            StoreSight::Absent(format!("the bus could not list activatable names: {e}"))
+        }
+    }
+}
+
+/// Wait, bounded, for the credential store to be able to answer.
+///
+/// Why this lives in the daemon and not in its unit: measured at login on the
+/// verified deployment (2026-08-12), the user manager reached `default.target`
+/// and started the daemon at t=20.7s, while `org.freedesktop.secrets` appeared
+/// at t=25.8s — owned by `ksecretd`, which PAM starts inside the login
+/// session's scope (`session-N.scope`, `UserUnit=n/a`) with the login password
+/// on inherited file descriptors. There is no user unit an `After=` could
+/// name, the bus name is not activatable so the bus cannot summon it, and an
+/// ordering against a unit outside the daemon's own start transaction orders
+/// nothing anyway. So the process that needs the store is the one that waits
+/// for it — and says so, once, rather than exiting with an error a reader
+/// cannot tell from a missing credential.
+///
+/// A store that answers "no such credential" is *not* waited for: `NoEntry`
+/// is an authoritative answer (see [`SecretBackend::load`]), and papering
+/// over it here would turn "you need to sign in" into a silent minute of
+/// nothing.
+pub fn wait_for_secret_service(bound: Duration) -> io::Result<()> {
+    let mut connection = None;
+    wait_for_store(
+        bound,
+        &mut || secret_service_sight(&mut connection),
+        &mut std::thread::sleep,
+        &mut |line| eprintln!("{line}"),
+    )
+}
+
+/// The loop and the judgment, separated from the bus so a test can hand it
+/// sights this machine cannot produce. Time is counted in sleeps actually
+/// requested, not read from a clock, so the tests neither wait nor race.
+fn wait_for_store(
+    bound: Duration,
+    look: &mut dyn FnMut() -> StoreSight,
+    sleep: &mut dyn FnMut(Duration),
+    log: &mut dyn FnMut(&str),
+) -> io::Result<()> {
+    let mut waited = Duration::ZERO;
+    let mut announced = false;
+    loop {
+        match look() {
+            StoreSight::Present(how) => {
+                if announced {
+                    log(&format!(
+                        "onedrive-hydration-daemon: Linux Secret Service became available \
+                         after {:.1}s ({how})",
+                        waited.as_secs_f64()
+                    ));
+                }
+                return Ok(());
+            }
+            StoreSight::Absent(detail) if waited >= bound => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "Linux Secret Service did not come up within {}s: {detail}. The \
+                         credential store itself is unavailable — that is not a missing \
+                         credential, and enrolling again will not help. A Secret Service \
+                         provider (ksecretd, gnome-keyring) normally starts with the \
+                         desktop session; without one this daemon fails closed on purpose",
+                        bound.as_secs()
+                    ),
+                ));
+            }
+            StoreSight::Absent(detail) => {
+                // Once. A line per poll would be five thousand copies of the
+                // same fact on a store that never comes up.
+                if !announced {
+                    log(&format!(
+                        "onedrive-hydration-daemon: the credential store is not up yet \
+                         ({detail}); waiting up to {}s for the session to bring it up",
+                        bound.as_secs()
+                    ));
+                    announced = true;
+                }
+            }
+        }
+        sleep(STORE_POLL);
+        waited += STORE_POLL;
     }
 }
 
@@ -125,7 +291,7 @@ impl<B: SecretBackend> CredentialStore for SecretServiceCredentialStore<B> {
     }
 }
 
-fn secret_service_error(message: &'static str) -> io::Error {
+fn secret_service_error(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message)
 }
 
@@ -311,6 +477,120 @@ mod tests {
     fn missing_secret_is_signed_out_not_an_empty_credential() {
         let store = SecretServiceCredentialStore(MemorySecret::default());
         assert!(store.load().unwrap().is_none());
+    }
+
+    // --- the bounded wait for the credential store ------------------------
+    //
+    // The loop is exercised with scripted sights and counted sleeps: no bus,
+    // no clock, no live credential — per the repository rule — and the
+    // assertions are on the load-bearing words of the messages, because the
+    // messages are the fix (a wait that failed with the old text would still
+    // read as "sign in again").
+
+    #[test]
+    fn store_wait_is_silent_when_the_store_is_already_up() {
+        let mut looks = 0;
+        let mut slept = Vec::new();
+        let mut lines: Vec<String> = Vec::new();
+        wait_for_store(
+            Duration::from_secs(60),
+            &mut || {
+                looks += 1;
+                StoreSight::Present("owned")
+            },
+            &mut |d| slept.push(d),
+            &mut |l| lines.push(l.to_owned()),
+        )
+        .unwrap();
+        assert_eq!(looks, 1);
+        assert!(slept.is_empty(), "a present store must cost no sleep");
+        assert!(
+            lines.is_empty(),
+            "the healthy path must not chatter: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn store_wait_outlasts_the_login_race_and_narrates_it_once() {
+        let mut sights = VecDeque::from([
+            StoreSight::Absent("org.freedesktop.secrets has no owner".into()),
+            StoreSight::Absent("org.freedesktop.secrets has no owner".into()),
+            StoreSight::Present("owned"),
+        ]);
+        let mut slept = Vec::new();
+        let mut lines: Vec<String> = Vec::new();
+        wait_for_store(
+            Duration::from_secs(60),
+            &mut || sights.pop_front().expect("the script covers every look"),
+            &mut |d| slept.push(d),
+            &mut |l| lines.push(l.to_owned()),
+        )
+        .unwrap();
+        assert_eq!(slept.len(), 2, "one sleep per absent sight");
+        assert_eq!(
+            lines.len(),
+            2,
+            "one announcement, one resolution: {lines:?}"
+        );
+        assert!(lines[0].contains("not up yet"), "{}", lines[0]);
+        assert!(lines[0].contains("waiting up to 60s"), "{}", lines[0]);
+        assert!(
+            lines[0].contains("has no owner"),
+            "the announcement carries what was actually seen: {}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("became available after 1.0s"),
+            "{}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn store_wait_deadline_is_a_store_outage_not_a_missing_credential() {
+        let mut slept = Vec::new();
+        let mut lines: Vec<String> = Vec::new();
+        let err = wait_for_store(
+            Duration::from_secs(3),
+            &mut || {
+                StoreSight::Absent(
+                    "org.freedesktop.secrets has no owner and is not activatable on the \
+                     session bus"
+                        .into(),
+                )
+            },
+            &mut |d| slept.push(d),
+            &mut |l| lines.push(l.to_owned()),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        let msg = err.to_string();
+        assert!(msg.contains("did not come up within 3s"), "{msg}");
+        assert!(msg.contains("not activatable"), "{msg}");
+        // The words that keep a reader from re-enrolling over an outage.
+        assert!(msg.contains("not a missing credential"), "{msg}");
+        assert!(msg.contains("enrolling again will not help"), "{msg}");
+        // Bounded in sleeps, not wall clock: 3s at 500ms per look.
+        assert_eq!(slept.len(), 6);
+        assert_eq!(
+            lines.len(),
+            1,
+            "the wait announces once, not per poll: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn keyring_failures_keep_the_underlying_error_visible() {
+        // The mapping itself: whatever the platform said must survive into
+        // the io::Error a journal shows, or a login race and a corrupted
+        // store read identically (which is the defect this repository
+        // measured on 2026-08-12).
+        let err = secret_service_error(format!(
+            "could not read the OneDrive credential from Linux Secret Service: {}",
+            keyring::Error::Invalid("session".into(), "collection is locked".into())
+        ));
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("collection is locked"), "{err}");
     }
 
     #[test]

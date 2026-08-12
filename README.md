@@ -51,7 +51,12 @@ cargo run -p onedrive-hydration-daemon -- auth \
   --client-id <azure-client-id>
 ```
 
-Then start the daemon. The signed-in user's primary drive ID is resolved automatically:
+Then start the daemon. The signed-in user's primary drive ID is resolved automatically.
+At startup `run` waits, bounded (60s), for `org.freedesktop.secrets` to be owned or
+activatable on the session bus — at login the daemon is regularly started before PAM has
+brought the credential store up (measured; the store here is `ksecretd`, started inside the
+session scope, so no unit ordering can express the dependency) — and its errors distinguish
+"the store is not up" from "there is no credential":
 
 ```text
 cargo run -p onedrive-hydration-daemon -- run \
@@ -86,7 +91,9 @@ method with named errors, and a `StateChanged` signal that fires once per distin
 While the daemon is down the service keeps running and reports `DaemonRunning` false; when the
 daemon restarts it reconnects on its own with bounded backoff. Eviction over the bus is held
 to the same boundary as the socket: callers whose uid the bus cannot attribute to the daemon's
-owner are refused.
+owner are refused. Installed deployments never start this service eagerly: the installer
+writes a D-Bus activation file, and the session bus starts the service the first time
+anything talks to the name (see [packaging/systemd](packaging/systemd/README.md)).
 
 The tray icon subscribes to exactly that signal — it never polls:
 

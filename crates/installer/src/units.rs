@@ -71,6 +71,9 @@ pub struct Templates {
     pub sync_service: String,
     pub dbus_service: String,
     pub tray_service: String,
+    /// Not a systemd unit: the D-Bus activation file that lets the session
+    /// bus start the state service on first use of its name.
+    pub dbus_activation: String,
 }
 
 impl Default for Templates {
@@ -81,6 +84,7 @@ impl Default for Templates {
             sync_service: SYNC_SERVICE.into(),
             dbus_service: DBUS_SERVICE.into(),
             tray_service: TRAY_SERVICE.into(),
+            dbus_activation: DBUS_ACTIVATION.into(),
         }
     }
 }
@@ -93,11 +97,19 @@ pub struct Rendered {
     pub system: Vec<UnitFile>,
     /// Installed under `~user/.config/systemd/user`.
     pub user: Vec<UnitFile>,
+    /// Installed under `~user/.local/share/dbus-1/services`: D-Bus activation
+    /// files, read by the session bus, not by systemd. The state service is
+    /// started this way — on first use of its name — rather than eagerly at
+    /// login, so a session with no subscriber runs no state service.
+    pub bus_services: Vec<UnitFile>,
 }
 
 impl Rendered {
     pub fn all(&self) -> impl Iterator<Item = &UnitFile> {
-        self.system.iter().chain(self.user.iter())
+        self.system
+            .iter()
+            .chain(self.user.iter())
+            .chain(self.bus_services.iter())
     }
 }
 
@@ -163,6 +175,10 @@ pub fn render(t: &Templates, f: &Facts) -> Rendered {
                 text: sub(&t.tray_service),
             },
         ],
+        bus_services: vec![UnitFile {
+            name: "io.github.franzjeger.OneDriveHydration.service".into(),
+            text: sub(&t.dbus_activation),
+        }],
     }
 }
 
@@ -218,6 +234,15 @@ pub fn user_unit_dir(prefix: &Path, home: &Path) -> std::path::PathBuf {
     prefix.join(rel).join(".config/systemd/user")
 }
 
+/// Where the session bus looks for activation files: `$XDG_DATA_HOME`
+/// defaulting to `~/.local/share`, then `dbus-1/services`. The installer uses
+/// the default rather than reading the user's environment because it usually
+/// runs as root, where `$XDG_DATA_HOME` would describe the wrong user.
+pub fn dbus_service_dir(prefix: &Path, home: &Path) -> std::path::PathBuf {
+    let rel = home.strip_prefix("/").unwrap_or(home);
+    prefix.join(rel).join(".local/share/dbus-1/services")
+}
+
 // ---------------------------------------------------------------------------
 // The templates live next to this crate as `templates/*.in`, copied from the
 // hand-written units that were verified on a real deployment across a real
@@ -233,3 +258,5 @@ const HYDRATIOND_PATH: &str = include_str!("../templates/hydrationd.path.in");
 const SYNC_SERVICE: &str = include_str!("../templates/onedrive-hydration.service.in");
 const DBUS_SERVICE: &str = include_str!("../templates/onedrive-hydration-dbus.service.in");
 const TRAY_SERVICE: &str = include_str!("../templates/onedrive-hydration-tray.service.in");
+const DBUS_ACTIVATION: &str =
+    include_str!("../templates/io.github.franzjeger.OneDriveHydration.service.in");

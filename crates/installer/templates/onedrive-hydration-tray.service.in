@@ -13,20 +13,28 @@ Documentation=https://github.com/franzjeger/OneDriveHydration
 # A tray exists only inside a graphical session, and should go away with it.
 After=graphical-session.target
 PartOf=graphical-session.target
-
-[Service]
-ExecStart=@BIN@/onedrive-hydration-tray --mount @MOUNT_USER@
 # On a desktop with no org.kde.StatusNotifierWatcher the binary exits saying
 # so. At login the watcher (plasmashell/kded6) may simply not be up yet, so a
 # few spaced retries are correct — but on a desktop that will never have one,
 # retrying forever is noise, so the limit below turns persistent absence into
-# a visibly failed unit (~ten attempts) rather than an every-five-seconds
-# respawn for the rest of the session. Once running, the binary re-registers
-# by itself when the watcher restarts; the limit only governs startup.
-Restart=on-failure
-RestartSec=5
+# a visibly failed unit (~ten attempts at RestartSec=5) rather than an
+# every-five-seconds respawn for the rest of the session. Once running, the
+# binary re-registers by itself when the watcher restarts; the limit only
+# governs startup.
+#
+# These two live in [Unit], where systemd reads them. An earlier revision put
+# them in [Service]: `systemd-analyze verify` (systemd 261) reports the
+# modern spelling as an unknown [Service] key and *ignores* it — only the
+# pre-229 names StartLimitInterval=/StartLimitBurst= are honored there — and
+# with RestartSec=5 the default limit (5 in 10s) can never trip, so the
+# "bounded retries" were silently unbounded.
 StartLimitIntervalSec=200
 StartLimitBurst=10
+
+[Service]
+ExecStart=@BIN@/onedrive-hydration-tray --mount @MOUNT_USER@
+Restart=on-failure
+RestartSec=5
 
 NoNewPrivileges=yes
 RestrictRealtime=yes

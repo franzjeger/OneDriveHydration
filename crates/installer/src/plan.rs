@@ -487,6 +487,14 @@ fn placement(rendered: &Rendered, facts: &Facts, opts: &Options) -> Vec<Action> 
     for unit in &rendered.user {
         place(unit, &usr_dir, &usr_rt, owner);
     }
+    // D-Bus activation files carry no [Install] section, so `place` writes
+    // them without enablement links — the session bus itself is what reads
+    // this directory, and dropping the file there *is* the enablement.
+    let bus_dir = units::dbus_service_dir(&opts.prefix, &facts.home);
+    let bus_rt = units::dbus_service_dir(Path::new("/"), &facts.home);
+    for unit in &rendered.bus_services {
+        place(unit, &bus_dir, &bus_rt, owner);
+    }
     actions
 }
 
@@ -603,7 +611,11 @@ pub fn install(
              .wants link and arms at next boot; to arm it now: sudo systemctl start \
              hydrationd.path)\n\
              then, as {u}: systemctl --user daemon-reload && systemctl --user start \
-             onedrive-hydration.service onedrive-hydration-dbus.service\n\
+             onedrive-hydration.service\n\
+             the state service needs no start or enablement: it is D-Bus-activated \
+             the first time anything talks to its name (the tray, busctl, the \
+             flyout); a session bus that predates this install may need one \
+             log-out/log-in to notice the new activation file\n\
              the tray starts with the next graphical session, or now with: systemctl \
              --user start onedrive-hydration-tray.service (icons: run \
              packaging/icons/install-icons.sh once per user)\n\
@@ -741,8 +753,20 @@ pub fn uninstall(facts: &Facts, mounted: bool, and_unmount: bool, opts: &Options
             path: usr_dir.join(name),
         });
     }
+    // The state service's D-Bus activation file. Removed with the units so
+    // nothing can re-activate a service whose binary is about to be
+    // unreachable; RemoveFile tolerates absence for deployments that predate
+    // activation.
+    actions.push(Action::RemoveFile {
+        path: units::dbus_service_dir(&opts.prefix, &facts.home)
+            .join("io.github.franzjeger.OneDriveHydration.service"),
+    });
     for link in [
         "default.target.wants/onedrive-hydration.service",
+        // Written by installs that predate D-Bus activation of the state
+        // service; current installs write no such link, but an uninstall has
+        // to clean up the deployments that exist, not the ones this version
+        // would make.
         "default.target.wants/onedrive-hydration-dbus.service",
         "graphical-session.target.wants/onedrive-hydration-tray.service",
     ] {

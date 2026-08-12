@@ -1,6 +1,9 @@
 use hydration_client::daemon_loop::{self, Config};
 use hydration_graph::{DriveScope, GraphAccess, GraphHttp, TagSource};
-use onedrive_hydration_daemon::{auth_config, discover_drive, runtime_socket, token_cache};
+use onedrive_hydration_daemon::{
+    auth_config, discover_drive, runtime_socket, token_cache, wait_for_secret_service,
+    SECRET_SERVICE_WAIT,
+};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -75,6 +78,16 @@ fn auth_error(action: &'static str) -> impl FnOnce(hydration_graph::auth::AuthEr
 
 fn main() -> io::Result<()> {
     let args = parse();
+    if let Command::Run { .. } = &args.command {
+        // At login the daemon races the credential store: the user manager
+        // starts this unit before PAM has started the Secret Service
+        // provider, and there is nothing the unit could order itself after
+        // (measured; see wait_for_secret_service). Wait here, bounded, before
+        // the first thing that reads the store — token_cache's migration
+        // check. `auth` stays immediate: it is interactive, and a human at a
+        // prompt is better served by the error than by a silent minute.
+        wait_for_secret_service(SECRET_SERVICE_WAIT)?;
+    }
     let cache = token_cache(auth_config(args.client_id), &args.state_dir)?;
     match args.command {
         Command::Auth => {

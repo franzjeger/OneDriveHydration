@@ -496,6 +496,108 @@ fn mount_outside_home_is_rendered_literally() {
     assert!(rendered.user[0].text.contains("--mount /srv/onedrive"));
 }
 
+// --- the state service: activated by the bus, not started eagerly ---------
+
+/// One `Key=value` line of a KeyFile/unit body, comments skipped — the same
+/// reading the consumers (the bus, systemd) apply.
+fn keyed(text: &str, key: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim_start)
+        .filter(|l| !l.starts_with('#') && !l.starts_with(';'))
+        .find_map(|l| l.strip_prefix(key).map(|v| v.trim().to_string()))
+}
+
+#[test]
+fn dbus_activation_file_agrees_with_the_unit_it_starts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = facts("/home/u/OneDrive", &payload_dir(tmp.path()));
+    let rendered = units::render(&Templates::default(), &f);
+    let activation = &rendered.bus_services[0];
+    assert_eq!(
+        activation.name,
+        "io.github.franzjeger.OneDriveHydration.service"
+    );
+
+    let unit = rendered
+        .user
+        .iter()
+        .find(|u| u.name == "onedrive-hydration-dbus.service")
+        .expect("the unit the activation file names must be generated too");
+
+    // Same name, same binary, same unit — generated from the same facts, so
+    // a template edit cannot leave the bus starting one thing while systemd
+    // describes another.
+    assert_eq!(
+        keyed(&activation.text, "Name=").as_deref(),
+        keyed(&unit.text, "BusName=").as_deref(),
+        "the activation file and the unit must claim the same bus name"
+    );
+    assert_eq!(
+        keyed(&activation.text, "SystemdService=").as_deref(),
+        Some(unit.name.as_str())
+    );
+    assert_eq!(
+        keyed(&activation.text, "Exec=").as_deref(),
+        keyed(&unit.text, "ExecStart=").as_deref(),
+        "bus-fallback Exec= and the unit's ExecStart= must run the same binary"
+    );
+
+    // Eager start is gone on purpose: no [Install], no WantedBy.
+    assert!(
+        keyed(&unit.text, "WantedBy=").is_none(),
+        "the state service must not carry an eager enablement:\n{}",
+        unit.text
+    );
+}
+
+#[test]
+fn a_drifted_activation_file_is_refused_without_force() {
+    let tmp = tempfile::tempdir().unwrap();
+    let prefix = tmp.path().join("p");
+    let f = facts("/home/u/OneDrive", &payload_dir(tmp.path()));
+    let o = opts(&prefix);
+
+    let planned = install(&f, &Templates::default(), &good_observed(), &o);
+    let (_, r) = execute(
+        planned.actions.as_ref().unwrap(),
+        ExecMode {
+            write_files: true,
+            run_commands: false,
+        },
+    );
+    r.unwrap();
+
+    // A deployment whose activation file points somewhere else must not be
+    // silently repointed: the collision refusal covers the bus's file the
+    // same way it covers the units.
+    let path = prefix
+        .join("home/u/.local/share/dbus-1/services/io.github.franzjeger.OneDriveHydration.service");
+    std::fs::write(
+        &path,
+        "[D-BUS Service]\nName=io.github.franzjeger.OneDriveHydration\nExec=/somewhere/else\n",
+    )
+    .unwrap();
+    let planned = install(&f, &Templates::default(), &good_observed(), &o);
+    let msg = refusal(&planned, "collision");
+    assert!(msg.contains("dbus-1/services"), "{msg}");
+    assert!(msg.contains("--force"), "{msg}");
+    assert!(planned.actions.is_none());
+
+    let mut forced = o.clone();
+    forced.force = true;
+    let planned = install(&f, &Templates::default(), &good_observed(), &forced);
+    let (_, r) = execute(
+        planned.actions.as_ref().unwrap(),
+        ExecMode {
+            write_files: true,
+            run_commands: false,
+        },
+    );
+    r.unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("SystemdService=onedrive-hydration-dbus.service"));
+}
+
 // --- installation, idempotence, drift -----------------------------------
 
 #[test]
@@ -542,6 +644,18 @@ fn install_writes_units_links_and_is_idempotent_until_forced() {
         .join("graphical-session.target.wants/onedrive-hydration-tray.service")
         .read_link()
         .is_ok());
+    // The state service is D-Bus-activated: its activation file lands where
+    // the session bus looks, and there is deliberately no enablement link —
+    // an eager start would run it for sessions with no subscriber.
+    let bus = prefix.join("home/u/.local/share/dbus-1/services");
+    assert!(bus
+        .join("io.github.franzjeger.OneDriveHydration.service")
+        .is_file());
+    assert!(
+        !usr.join("default.target.wants/onedrive-hydration-dbus.service")
+            .exists(),
+        "the state service must not be started eagerly; activation is the trigger"
+    );
 
     // Second run: same facts, no rewrites, no refusals.
     let planned = install(&f, &Templates::default(), &good_observed(), &o);
@@ -674,6 +788,11 @@ fn uninstall_when_unmounted_stops_the_helper_directly_and_removes_files() {
     assert!(!prefix
         .join("home/u/.config/systemd/user/onedrive-hydration.service")
         .exists());
+    // The activation file goes with the units: a leftover would let the bus
+    // keep starting a service whose binary uninstall just orphaned.
+    assert!(!prefix
+        .join("home/u/.local/share/dbus-1/services/io.github.franzjeger.OneDriveHydration.service")
+        .exists());
     // What stays is stated, not silently skipped.
     assert!(log.iter().any(|l| l.contains("left in place on purpose")));
 }
@@ -698,7 +817,7 @@ fn cli_refuses_unknown_user_with_exit_code_one() {
 }
 
 #[test]
-fn cli_render_prints_all_five_units_without_writing() {
+fn cli_render_prints_the_whole_generated_set_without_writing() {
     let user = std::env::var("USER").unwrap_or_else(|_| "root".into());
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_onedrive-hydration-install"))
         .args([
@@ -720,6 +839,8 @@ fn cli_render_prints_all_five_units_without_writing() {
         "onedrive-hydration.service",
         "onedrive-hydration-dbus.service",
         "onedrive-hydration-tray.service",
+        // Not a unit: the D-Bus activation file, reviewed and diffed like one.
+        "io.github.franzjeger.OneDriveHydration.service",
     ] {
         assert!(stdout.contains(&format!("# ==> {name} <==")), "{name}");
     }

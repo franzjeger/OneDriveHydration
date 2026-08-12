@@ -17,9 +17,8 @@ ExecStart=@BIN@/onedrive-hydration-dbus
 # While the sync daemon is down this service keeps running and reports
 # DaemonRunning=false, reconnecting on its own with bounded backoff — daemon
 # absence is a reported state, not a failure. Restart= therefore only covers
-# crashes. A second copy of the binary requests the name with DoNotQueue and
-# exits non-zero rather than serving nothing; the default start rate limit (5
-# in 10s) turns that into a visibly failed unit instead of a silent loop.
+# crashes, and the default start rate limit (5 in 10s) turns a crash loop into
+# a visibly failed unit instead of a silent one.
 Restart=on-failure
 RestartSec=2
 
@@ -27,5 +26,13 @@ NoNewPrivileges=yes
 RestrictRealtime=yes
 LockPersonality=yes
 
-[Install]
-WantedBy=default.target
+# No [Install] section, on purpose: this service is D-Bus-activated. The
+# companion file the installer writes to ~/.local/share/dbus-1/services/
+# names this unit in its SystemdService= line, so the bus asks the user
+# manager to start it the first time anything talks to the name — the tray's
+# initial cold property read, a busctl introspect, the future flyout. A
+# session with no subscriber runs no state service at all, which is the
+# point: an eagerly started copy would spend the whole session serving state
+# to nobody, and the bus queues the activating call until the name appears,
+# so even the first caller loses nothing. A hand start still works:
+#   systemctl --user start onedrive-hydration-dbus.service

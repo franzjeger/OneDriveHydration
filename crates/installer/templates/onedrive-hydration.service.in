@@ -18,6 +18,17 @@ Documentation=https://github.com/franzjeger/OneDriveHydration
 # filesystem underneath the mount, where nothing can ever hydrate them.
 RequiresMountsFor=@MOUNT_USER@
 
+# Deliberately NOT ordered after the credential store, because it cannot be:
+# on the verified deployment org.freedesktop.secrets is owned by ksecretd,
+# which PAM starts inside the login session's scope (UserUnit=n/a — there is
+# no user unit to name in After=), and the name is not activatable, so the
+# bus cannot summon it either. Measured at login 2026-08-12: this unit
+# started with default.target at t=20.7s, the store appeared at t=25.8s; an
+# After= on something outside this start transaction orders nothing. The
+# daemon closes the gap itself: at startup it waits, bounded, for
+# org.freedesktop.secrets to be owned or activatable, and its errors say
+# which of "the store is not up" and "there is no credential" it saw.
+
 [Service]
 Type=simple
 # The client id is public configuration, not a secret — the code says so where
