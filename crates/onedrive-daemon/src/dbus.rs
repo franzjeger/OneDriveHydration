@@ -16,13 +16,19 @@
 //! that running against a misconfigured or shared bus does not quietly widen
 //! who may throw away local bytes.
 //!
-//! State flows one way. The service holds a single long-lived `watch`
-//! connection to the daemon (one state line immediately, another per change,
-//! no line when nothing changed, nothing else on that connection ever) and
-//! republishes each line as D-Bus property values plus a `StateChanged`
-//! signal. However many trays and flyouts subscribe here, the daemon sees
+//! State flows one way. The service holds one long-lived `watch` connection
+//! per daemon socket — the control socket for the counters, the auth-state
+//! socket for the sign-in conclusion — each streaming one state line
+//! immediately, another per change, no line when nothing changed, nothing
+//! else ever. Every line is republished as D-Bus property values plus a
+//! signal: `StateChanged` for the counters, `CredentialStateChanged` for the
+//! sign-in. Two signals rather than one grown signal, because the tray
+//! deserializes `StateChanged` with a fixed `(bool,u64,u64,u64)` signature
+//! and silently drops anything shaped differently — the wire contract is
+//! additive only for *new members*, never for new arguments on old ones.
+//! However many trays and flyouts subscribe here, each daemon socket sees
 //! exactly one watcher — this service — out of the small number it caps
-//! watchers at; the connection is held even while nobody is subscribed,
+//! watchers at; the connections are held even while nobody is subscribed,
 //! because the properties have to answer a cold read correctly either way.
 //!
 //! When the daemon restarts, its socket is unlinked and rebound, so the held
@@ -33,6 +39,7 @@
 //! the connection without a line — indistinguishable from a restart mid
 //! connect, and handled the same way: the bounded retry, not an error.
 
+use crate::auth_state::{self, CredentialState};
 use crate::control_request;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -197,6 +204,99 @@ pub fn watch_daemon(
     }
 }
 
+/// Extract the credential state from one auth-socket `watch` line, if the
+/// line carries one. Unknown keys are skipped, per the wire contract; a
+/// recognised key with an unrecognised value degrades to
+/// [`CredentialState::Unknown`] inside `from_wire`, so a newer daemon's new
+/// word reads as "cannot say" rather than as a dead connection.
+pub fn apply_credential_line(line: &str) -> Option<CredentialState> {
+    let mut found = None;
+    for token in line.split_whitespace() {
+        let Some((key, value)) = token.split_once('=') else {
+            continue;
+        };
+        if key == auth_state::KEY {
+            found = Some(CredentialState::from_wire(value));
+        }
+    }
+    found
+}
+
+/// One `watch` connection to the auth-state socket; the shape of
+/// [`watch_once`], for the same reasons line by line: running is decided by
+/// the first state line, a bare-EOF refusal stays silent, and no read
+/// timeout is set because silence is the healthy condition.
+fn watch_credential_once(
+    socket: &Path,
+    state: &mut CredentialState,
+    on_state: &mut dyn FnMut(CredentialState),
+) -> bool {
+    let Ok(mut stream) = UnixStream::connect(socket) else {
+        return false;
+    };
+    if stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .is_err()
+        || stream.write_all(b"watch\n").is_err()
+    {
+        return false;
+    }
+    let mut saw_state_line = false;
+    for line in BufReader::new(stream).lines() {
+        let Ok(line) = line else { break };
+        if let Some(credential) = apply_credential_line(&line) {
+            *state = credential;
+            saw_state_line = true;
+            on_state(*state);
+        }
+    }
+    saw_state_line
+}
+
+/// Hold a `watch` connection to the daemon's auth-state socket forever,
+/// mirroring [`watch_daemon`]'s reconnect and dedup rules, with one
+/// deliberate difference: on disconnect the published state becomes
+/// [`CredentialState::Unknown`] instead of being held.
+///
+/// The counters can be held because a tray only ever *quotes* them while
+/// the daemon is down. A credential assertion is different: it pairs with
+/// an instruction — "sign in again" — and an instruction backed by a
+/// process that no longer exists is exactly the wrong message this surface
+/// exists to avoid. This loop also cannot mark its value as held: the
+/// running/stopped flag lives on the control-socket loop, not here, so
+/// "unknown" is the one honest word it has. An absent socket — a daemon
+/// built before this surface, or none at all — therefore reads as a
+/// permanent, quiet Unknown, which costs one bounded connect per backoff
+/// ceiling, the same as [`watch_daemon`] against a stopped daemon.
+pub fn watch_credential(
+    socket: &Path,
+    publish: &mut dyn FnMut(CredentialState),
+    sleep: &mut dyn FnMut(Duration),
+    keep_going: &mut dyn FnMut() -> bool,
+) {
+    let mut state = CredentialState::Unknown;
+    let mut last_published = CredentialState::Unknown;
+    let mut delay = RETRY_FLOOR;
+    while keep_going() {
+        let mut publish_distinct = |s: CredentialState| {
+            if s != last_published {
+                last_published = s;
+                publish(s);
+            }
+        };
+        let saw_state_line = watch_credential_once(socket, &mut state, &mut publish_distinct);
+        state = CredentialState::Unknown;
+        publish_distinct(state);
+        if saw_state_line {
+            delay = RETRY_FLOOR;
+            sleep(delay);
+        } else {
+            sleep(delay);
+            delay = RETRY_CEILING.min(delay * 2);
+        }
+    }
+}
+
 /// The daemon's one-line answer to `evict`, in a shape a caller can act on.
 #[derive(Debug, PartialEq, Eq)]
 pub enum EvictReply {
@@ -262,6 +362,11 @@ pub enum Error {
 pub struct ControlSurface {
     socket: PathBuf,
     state: DaemonState,
+    /// The sign-in conclusion from the daemon's auth-state socket, or
+    /// [`CredentialState::Unknown`] when no running daemon has asserted one.
+    /// Unlike the counters it is never held across a daemon restart; see
+    /// [`watch_credential`].
+    credential: CredentialState,
     /// When `Some(uid)`, `Evict` refuses callers the bus cannot attribute to
     /// exactly that uid. The binary always sets this to its own euid,
     /// mirroring the socket's `0o600`. `None` exists for the peer-to-peer
@@ -275,6 +380,7 @@ impl ControlSurface {
         Self {
             socket,
             state: DaemonState::default(),
+            credential: CredentialState::Unknown,
             require_uid,
         }
     }
@@ -344,6 +450,22 @@ impl ControlSurface {
         self.state.exposures
     }
 
+    /// The daemon's sign-in conclusion: `"healthy"`, `"unsaved"` (signed in
+    /// and syncing, but the rotated credential cannot be written to Secret
+    /// Service), `"rejected"` (the service has conclusively refused the
+    /// stored credential; a new enrollment is the only cure), or
+    /// `"unknown"` when no running daemon has asserted one — the daemon is
+    /// stopped, or predates the auth-state socket. Readers must treat
+    /// values they do not recognise as `"unknown"`: the vocabulary is
+    /// allowed to grow. Never rely on this while `DaemonRunning` is false;
+    /// it will read `"unknown"`, and that is the point — a stopped daemon
+    /// cannot distinguish a missing credential from a locked keyring, and
+    /// neither can this surface.
+    #[zbus(property)]
+    fn credential_state(&self) -> String {
+        self.credential.as_wire().to_owned()
+    }
+
     /// Return a hydrated file to a placeholder, freeing its local bytes.
     ///
     /// `path` is relative to the sync root and goes to the daemon unchanged —
@@ -398,6 +520,16 @@ impl ControlSurface {
         excluded: u64,
         exposures: u64,
     ) -> zbus::Result<()>;
+
+    /// Fired once per distinct `CredentialState` value, carrying it, so a
+    /// subscriber never needs a follow-up read. A new signal rather than a
+    /// fifth argument on `StateChanged`: existing subscribers deserialize
+    /// that signal by its exact signature and would silently drop a grown
+    /// one. (The Rust name differs from the wire name only because the
+    /// `credential_state` property already generates a
+    /// `credential_state_changed` emitter for `PropertiesChanged`.)
+    #[zbus(signal, name = "CredentialStateChanged")]
+    pub async fn credential_changed(emitter: &SignalEmitter<'_>, state: &str) -> zbus::Result<()>;
 }
 
 /// Push a new state into a served [`ControlSurface`]: update the properties,
@@ -406,6 +538,27 @@ impl ControlSurface {
 /// Callable from a plain thread — this is the bridge [`watch_daemon`]'s
 /// `publish` closure is expected to be built from. The caller is responsible
 /// for only passing distinct states; this function emits unconditionally.
+/// Push a new credential state into a served [`ControlSurface`]: update the
+/// property, emit `PropertiesChanged` for it, then `CredentialStateChanged`.
+/// The bridge [`watch_credential`]'s `publish` closure is built from, the
+/// way [`publish_state`] serves [`watch_daemon`]; the caller passes distinct
+/// states only, and this emits unconditionally.
+pub fn publish_credential(
+    iface: &zbus::blocking::object_server::InterfaceRef<ControlSurface>,
+    credential: CredentialState,
+) -> zbus::Result<()> {
+    let mut surface = iface.get_mut();
+    let previous = surface.credential;
+    surface.credential = credential;
+    let emitter = iface.signal_emitter();
+    zbus::block_on(async {
+        if previous != credential {
+            surface.credential_state_changed(emitter).await?;
+        }
+        ControlSurface::credential_changed(emitter, credential.as_wire()).await
+    })
+}
+
 pub fn publish_state(
     iface: &zbus::blocking::object_server::InterfaceRef<ControlSurface>,
     state: DaemonState,
@@ -613,6 +766,104 @@ mod tests {
         server.join().unwrap();
         let secs: Vec<u64> = sleeps.iter().map(Duration::as_secs).collect();
         assert_eq!(secs, [1, 2, 4]);
+    }
+
+    #[test]
+    fn credential_lines_parse_by_key_and_degrade_by_value() {
+        assert_eq!(
+            apply_credential_line("credential=healthy"),
+            Some(CredentialState::Healthy)
+        );
+        assert_eq!(
+            apply_credential_line("credential=rejected future_key=7"),
+            Some(CredentialState::Rejected)
+        );
+        // A recognised key with a word this build does not know: the line
+        // is a state line (the connection is healthy), the state is not
+        // knowable. Unknown, not an error and not a dropped connection.
+        assert_eq!(
+            apply_credential_line("credential=quarantined"),
+            Some(CredentialState::Unknown)
+        );
+        // No recognised key at all: not a state line.
+        assert_eq!(apply_credential_line("unknown command: watch"), None);
+        assert_eq!(apply_credential_line(""), None);
+    }
+
+    /// The full life of a credential watch: connect, states, daemon
+    /// restart, reconnect — and the difference from the counter watch: a
+    /// disconnect publishes Unknown instead of holding the last value.
+    #[test]
+    fn credential_watch_publishes_distinct_states_and_forgets_on_disconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.auth");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(conn.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            assert_eq!(line, "watch\n");
+            conn.write_all(b"credential=healthy\n").unwrap();
+            conn.write_all(b"credential=healthy\n").unwrap(); // dedup fodder
+            conn.write_all(b"credential=rejected\n").unwrap();
+            drop(conn);
+            // The daemon restarted healthy: a fresh connection replays the
+            // current state.
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(conn.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            assert_eq!(line, "watch\n");
+            conn.write_all(b"credential=healthy\n").unwrap();
+        });
+
+        let mut published = Vec::new();
+        let mut rounds = 0;
+        watch_credential(
+            &socket,
+            &mut |s| published.push(s),
+            &mut |_| {},
+            &mut || {
+                rounds += 1;
+                rounds <= 2
+            },
+        );
+        server.join().unwrap();
+
+        assert_eq!(
+            published,
+            [
+                CredentialState::Healthy,
+                CredentialState::Rejected,
+                CredentialState::Unknown, // the asserting daemon went away
+                CredentialState::Healthy, // reconnected
+                CredentialState::Unknown, // gone again
+            ]
+        );
+    }
+
+    /// An absent auth socket — a daemon built before the surface existed,
+    /// or no daemon at all — publishes nothing, forever, at a bounded cost.
+    #[test]
+    fn credential_watch_stays_quiet_and_backs_off_without_a_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("never-bound.auth");
+        let mut sleeps = Vec::new();
+        let mut rounds = 0;
+        watch_credential(
+            &socket,
+            &mut |s| panic!("published {s:?} without a daemon"),
+            &mut |d| sleeps.push(d),
+            &mut || {
+                rounds += 1;
+                rounds <= 6
+            },
+        );
+        let secs: Vec<u64> = sleeps.iter().map(Duration::as_secs).collect();
+        assert_eq!(secs, [1, 2, 4, 8, 16, 30]);
     }
 
     /// No daemon: no publishes (the surface already starts as "not

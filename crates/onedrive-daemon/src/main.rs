@@ -1,5 +1,6 @@
 use hydration_client::daemon_loop::{self, Config};
 use hydration_graph::{DriveScope, GraphAccess, GraphHttp, TagSource};
+use onedrive_hydration_daemon::auth_state::{self, CredentialHealth, PublisherOptions};
 use onedrive_hydration_daemon::{
     auth_config, discover_drive, runtime_socket, token_cache, wait_for_secret_service,
     SECRET_SERVICE_WAIT,
@@ -125,6 +126,10 @@ fn main() -> io::Result<()> {
                 profile.id.as_str(),
                 profile.drive_type
             );
+            // The publisher's clone, taken before the cache moves into the
+            // provider roles: the same shared cache all three roles refresh
+            // through is the one whose conclusions get published.
+            let observed = Arc::clone(&cache);
             let access = GraphAccess::with_token_cache(
                 DriveScope::primary(profile.id),
                 &mount,
@@ -132,6 +137,43 @@ fn main() -> io::Result<()> {
                 TagSource::QuickXor,
                 cache,
             );
+
+            // The sign-in state socket, next to daemon_loop's control socket.
+            // Product-owned because the credential is product knowledge: the
+            // run loop sees only opaque provider roles. A bind failure is
+            // announced and survived — the daemon can still sync without the
+            // surface, and the D-Bus side then answers "unknown", which is
+            // true — mirroring how daemon_loop treats its control socket.
+            let auth_socket = auth_state::auth_socket(&args.socket);
+            let enrollment = args.state_dir.join("refresh-token");
+            std::thread::spawn(move || {
+                let served = auth_state::serve(
+                    &auth_socket,
+                    PublisherOptions {
+                        sample_interval: auth_state::SAMPLE_INTERVAL,
+                        enrollment: Some(enrollment),
+                    },
+                    &mut || CredentialHealth {
+                        signed_in: observed.is_signed_in(),
+                        store_error: observed.last_store_error(),
+                    },
+                    // Adopting an enrollment is a restart on purpose: the
+                    // startup path is the only code that reads credential
+                    // bytes, and it re-runs drive discovery, so a sign-in
+                    // that names a different account is renegotiated rather
+                    // than spliced under a running sync. Nonzero, because
+                    // the unit restarts on failure only.
+                    &mut || std::process::exit(1),
+                    &mut || true,
+                );
+                if let Err(e) = served {
+                    eprintln!(
+                        "onedrive-hydration-daemon: the sign-in state socket could not be \
+                         served: {e}"
+                    );
+                }
+            });
+
             daemon_loop::run(
                 Config {
                     mount,

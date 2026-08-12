@@ -65,6 +65,17 @@ PlasmoidItem {
     property double excluded: 0
     property double exposures: 0
 
+    // The daemon's sign-in conclusion, from the CredentialState property and
+    // the CredentialStateChanged signal. "unknown" until a running daemon
+    // asserts one; words this build does not recognise behave as "unknown"
+    // because the arms below test for the words they know. Only consulted
+    // while daemonRunning is true — the service resets it when the daemon
+    // dies, but the mapping must not depend on that: a stopped daemon
+    // cannot tell a missing credential from a locked keyring, and a
+    // re-enroll instruction over a locked keyring is the exact wrong
+    // message. Mirrors tray.rs's present().
+    property string credentialState: "unknown"
+
     // False until the first read or signal after the service (re)appears.
     // Reads are asynchronous here (unlike the tray's blocking cold read), so
     // there is a moment where the service is on the bus but has not answered
@@ -74,7 +85,11 @@ PlasmoidItem {
 
     // Bumped on every applied signal so a cold read that was overtaken by a
     // signal mid-flight cannot roll the newer state back to an older one.
+    // The credential has its own generation because it arrives on its own
+    // signal: a counter signal must not discard the credential a cold read
+    // carries, nor the other way round.
     property int stateGeneration: 0
+    property int credentialGeneration: 0
 
     // The sync root. The daemon knows its mount but the D-Bus surface does
     // not expose it, so like the tray (which is told with --mount) the
@@ -126,14 +141,32 @@ PlasmoidItem {
         return " " + excluded + " files are cloud-only placeholders.";
     }
 
+    // The caveat appended to every running-state detail while the daemon
+    // reports it cannot persist the rotated sign-in; tray.rs's
+    // store_caveat(). A caveat and not a state: syncing still works, so the
+    // headline stays about the work.
+    function storeCaveat() {
+        if (root.credentialState !== "unsaved") {
+            return "";
+        }
+        return " Warning: the sign-in works but its rotation could not be saved to Linux Secret Service — unlock the keyring, or the next daemon start may require signing in again.";
+    }
+
     // Map what we know to what the panel shows — tray.rs's present(), with
     // one extra transient state for the asynchronous read gap. Precedence,
     // most urgent knowledge first: service absent, state not yet read,
     // daemon not running, exposures (the §6.4a hazard — another mount
     // reaches the sync files and reads through it bypass hydration entirely,
-    // the one condition a person can discover nowhere else), unsent work,
-    // synced. Wording rule for the stopped states: the files are
-    // *unreachable*, not lost, and the text says so explicitly.
+    // the one condition a person can discover nowhere else), sign-in
+    // required (the service has conclusively refused the stored sign-in;
+    // exposure still outranks it because exposure corrupts reads happening
+    // now, while a dead sign-in stops sync loudly), unsent work, synced.
+    // Wording rule for the stopped states: the files are *unreachable*, not
+    // lost, and the text says so explicitly — and the signed-out state
+    // follows the same rule, naming the enrollment tool that actually works
+    // on this deployment. Deliberately no sign-in button: the flyout cannot
+    // run a browser flow and does not even know the daemon's client id, so
+    // the honest ceiling is a sentence a person can follow in a terminal.
     readonly property var presentation: {
         if (!serviceWatcher.registered) {
             return {
@@ -171,6 +204,7 @@ PlasmoidItem {
             if (root.unsent > 0) {
                 detail += " " + root.count(root.unsent, "change is", "changes are") + " still waiting to upload.";
             }
+            detail += root.storeCaveat();
             return {
                 icon: root.iconExposed,
                 attention: true,
@@ -180,19 +214,31 @@ PlasmoidItem {
                 detail: detail
             };
         }
+        if (root.credentialState === "rejected") {
+            let detail = "OneDrive no longer accepts this machine's saved sign-in — it was revoked, expired, or invalidated by a password change or policy. Nothing is lost: every synced file is still in OneDrive, but nothing syncs and cloud-only files cannot be opened until you sign in again. Sign in from a terminal with tools/pkce-enroll.py (Conditional Access blocks the built-in device-code sign-in here); the daemon adopts it and restarts by itself.";
+            if (root.unsent > 0) {
+                detail += " " + root.count(root.unsent, "change is", "changes are") + " still waiting to upload.";
+            }
+            return {
+                icon: root.iconStopped,
+                attention: true,
+                headline: "Sign-in required",
+                detail: detail
+            };
+        }
         if (root.unsent > 0) {
             return {
                 icon: root.iconUnsent,
                 attention: false,
                 headline: root.count(root.unsent, "change", "changes") + " to upload",
-                detail: root.count(root.unsent, "local change has", "local changes have") + " not reached OneDrive yet." + root.placeholdersLine(root.excluded)
+                detail: root.count(root.unsent, "local change has", "local changes have") + " not reached OneDrive yet." + root.placeholdersLine(root.excluded) + root.storeCaveat()
             };
         }
         return {
             icon: root.iconSynced,
             attention: false,
             headline: "Up to date",
-            detail: "All local changes are in OneDrive." + root.placeholdersLine(root.excluded)
+            detail: "All local changes are in OneDrive." + root.placeholdersLine(root.excluded) + root.storeCaveat()
         };
     }
 
@@ -210,12 +256,29 @@ PlasmoidItem {
         root.stateKnown = true;
     }
 
-    // The one cold read. Applied only if no signal arrived while it was in
-    // flight: a signal always carries newer knowledge than a read issued
-    // before it, and the service emits StateChanged once per distinct state,
-    // so skipping the stale answer loses nothing.
+    // D-Bus strings arrive plain, but tolerate the {value: x} wrapper the
+    // way u64() does, and reduce anything that is not a string to
+    // "unknown" — the word for "nobody has asserted anything", which is
+    // also what an older service without the property answers through the
+    // undefined it leaves in GetAll's dictionary.
+    function credentialWord(v) {
+        const raw = (v !== null && typeof v === "object" && "value" in v) ? v.value : v;
+        return (typeof raw === "string") ? raw : "unknown";
+    }
+
+    function applyCredential(value) {
+        root.credentialGeneration += 1;
+        root.credentialState = root.credentialWord(value);
+    }
+
+    // The one cold read. Each half is applied only if no signal of its kind
+    // arrived while the read was in flight: a signal always carries newer
+    // knowledge than a read issued before it, and the service emits each
+    // signal once per distinct state, so skipping a stale answer loses
+    // nothing.
     function readAll() {
-        const generation = root.stateGeneration;
+        const stateGeneration = root.stateGeneration;
+        const credentialGeneration = root.credentialGeneration;
         DBus.SessionBus.asyncCall({
             service: root.busName,
             path: root.objectPath,
@@ -223,15 +286,17 @@ PlasmoidItem {
             member: "GetAll",
             arguments: [root.busName]
         }, reply => {
-            if (generation !== root.stateGeneration) {
-                return;
-            }
             const properties = reply.value;
-            root.applyState(
-                properties.DaemonRunning === true,
-                root.u64(properties.Unsent),
-                root.u64(properties.Excluded),
-                root.u64(properties.Exposures));
+            if (stateGeneration === root.stateGeneration) {
+                root.applyState(
+                    properties.DaemonRunning === true,
+                    root.u64(properties.Unsent),
+                    root.u64(properties.Excluded),
+                    root.u64(properties.Exposures));
+            }
+            if (credentialGeneration === root.credentialGeneration) {
+                root.applyCredential(properties.CredentialState);
+            }
         }, error => {
             // The service raced away between appearing and answering; the
             // service watcher flips `registered` off on its own, and the
@@ -299,6 +364,8 @@ PlasmoidItem {
                 root.readAll();
             } else {
                 root.stateKnown = false;
+                // Nothing the service asserted survives it leaving the bus.
+                root.applyCredential("unknown");
             }
         }
     }
@@ -319,6 +386,15 @@ PlasmoidItem {
                 root.u64(unsent),
                 root.u64(excluded),
                 root.u64(exposures));
+        }
+
+        // The sign-in conclusion travels on its own member — a new argument
+        // on StateChanged would have broken every subscriber that decodes
+        // it by signature — and a member with no matching function here is
+        // simply not dispatched, which is what lets an older flyout ignore
+        // a newer service.
+        function dbusCredentialStateChanged(state) {
+            root.applyCredential(state);
         }
     }
 

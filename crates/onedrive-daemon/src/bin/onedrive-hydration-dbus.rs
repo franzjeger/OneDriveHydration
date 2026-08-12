@@ -2,8 +2,10 @@
 //! and translates between D-Bus and the daemon's owner-only control socket.
 //! See the `dbus` module for the interface and the reasoning.
 
+use onedrive_hydration_daemon::auth_state;
 use onedrive_hydration_daemon::dbus::{
-    publish_state, watch_daemon, ControlSurface, BUS_NAME, OBJECT_PATH,
+    publish_credential, publish_state, watch_credential, watch_daemon, ControlSurface, BUS_NAME,
+    OBJECT_PATH,
 };
 use onedrive_hydration_daemon::runtime_socket;
 use std::io;
@@ -56,10 +58,38 @@ fn main() -> io::Result<()> {
         .object_server()
         .interface::<_, ControlSurface>(OBJECT_PATH)
         .map_err(io::Error::other)?;
+    // The daemon's second socket, derived the way the daemon derives it: the
+    // sign-in conclusion lives at `.auth` next to the control socket's
+    // `.ctl`. Watched on its own thread with its own backoff, because the
+    // two sockets fail independently — a daemon built before the auth-state
+    // surface serves the first and not the second, and that must cost this
+    // service nothing but a quiet, bounded retry and an honest "unknown".
+    let auth_socket = auth_state::auth_socket(&socket);
     eprintln!(
-        "onedrive-hydration-dbus: serving {BUS_NAME} at {OBJECT_PATH}, watching {}",
-        socket.display()
+        "onedrive-hydration-dbus: serving {BUS_NAME} at {OBJECT_PATH}, watching {} and {}",
+        socket.display(),
+        auth_socket.display()
     );
+    {
+        let iface = connection
+            .object_server()
+            .interface::<_, ControlSurface>(OBJECT_PATH)
+            .map_err(io::Error::other)?;
+        std::thread::spawn(move || {
+            watch_credential(
+                &auth_socket,
+                &mut |credential| {
+                    if let Err(e) = publish_credential(&iface, credential) {
+                        eprintln!(
+                            "onedrive-hydration-dbus: could not publish a credential change: {e}"
+                        );
+                    }
+                },
+                &mut std::thread::sleep,
+                &mut || true,
+            );
+        });
+    }
 
     // The bus connection runs on its own thread inside zbus; this thread's
     // whole job is holding the watch connection to the daemon.

@@ -12,6 +12,7 @@
 //! wherever the sentence is static, so rewording the tray without rewording
 //! the flyout fails here rather than shipping two products that disagree.
 
+use onedrive_hydration_daemon::auth_state::CredentialState;
 use onedrive_hydration_daemon::dbus::{DaemonState, BUS_NAME, INTERFACE, OBJECT_PATH};
 use onedrive_hydration_daemon::tray::{
     present, ICON_APP, ICON_EXPOSED, ICON_STOPPED, ICON_SYNCED, ICON_UNSENT,
@@ -37,6 +38,12 @@ fn state(daemon_running: bool, unsent: u64, excluded: u64, exposures: u64) -> Da
         excluded,
         exposures,
     }
+}
+
+/// The tray's mapping with no credential asserted — how every pre-existing
+/// state renders, pinned unchanged.
+fn shown(state: Option<DaemonState>) -> onedrive_hydration_daemon::tray::Presentation {
+    present(state, CredentialState::Unknown)
 }
 
 #[test]
@@ -83,7 +90,14 @@ fn the_flyout_dials_the_surface_this_crate_serves() {
         qml.contains("function dbusStateChanged("),
         "the flyout must subscribe to StateChanged, not poll"
     );
-    // The documented complement to the signal: one cold read of all four
+    // The sign-in conclusion travels on its own member, subscribed the same
+    // way, and its property is part of the cold read.
+    assert!(
+        qml.contains("function dbusCredentialStateChanged("),
+        "the flyout must subscribe to CredentialStateChanged, not poll"
+    );
+    assert!(qml.contains("properties.CredentialState"));
+    // The documented complement to the signal: one cold read of all the
     // properties when the service (re)appears.
     assert!(qml.contains("\"GetAll\""));
     // The one method the surface offers.
@@ -100,26 +114,53 @@ fn the_flyout_wording_cannot_drift_from_the_tray() {
     let qml = read("contents/ui/main.qml");
 
     // Wherever present() produces a static sentence, require it verbatim.
-    let service_absent = present(None);
+    let service_absent = shown(None);
     assert!(qml.contains(&service_absent.headline));
     assert!(qml.contains(&service_absent.detail));
 
-    let stopped = present(Some(state(false, 0, 0, 0)));
+    let stopped = shown(Some(state(false, 0, 0, 0)));
     assert!(qml.contains(&stopped.headline));
     assert!(
         qml.contains(&stopped.detail),
         "the stopped state must say, verbatim, that nothing is lost"
     );
 
-    let exposed_one = present(Some(state(true, 0, 0, 1)));
+    let exposed_one = shown(Some(state(true, 0, 0, 1)));
     assert!(qml.contains(&exposed_one.headline));
     assert!(qml.contains(&exposed_one.detail));
-    let exposed_many = present(Some(state(true, 0, 0, 2)));
+    let exposed_many = shown(Some(state(true, 0, 0, 2)));
     assert!(qml.contains(&exposed_many.detail));
 
-    let synced_bare = present(Some(state(true, 0, 0, 0)));
+    let synced_bare = shown(Some(state(true, 0, 0, 0)));
     assert!(qml.contains(&synced_bare.headline));
     assert!(qml.contains(&synced_bare.detail));
+
+    // The sign-in states, derived the same way. The rejected detail with no
+    // unsent work is one static sentence in both sources — including the
+    // tool that works on this deployment and why the device-code flow does
+    // not.
+    let rejected = present(Some(state(true, 0, 0, 0)), CredentialState::Rejected);
+    assert!(qml.contains(&rejected.headline));
+    assert!(
+        qml.contains(&rejected.detail),
+        "the signed-out state must carry the tray's wording verbatim, \
+         instruction included: {:?}",
+        rejected.detail
+    );
+
+    // The unsaved caveat is appended to a base sentence in both sources, so
+    // the contiguous literal is the caveat itself: derive it by stripping
+    // the base the tray put it after.
+    let unsaved = present(Some(state(true, 0, 0, 0)), CredentialState::Unsaved);
+    let caveat = unsaved
+        .detail
+        .strip_prefix(&synced_bare.detail)
+        .expect("the caveat is appended to the synced detail");
+    assert!(!caveat.is_empty());
+    assert!(
+        qml.contains(caveat),
+        "the flyout must carry the store caveat verbatim: {caveat:?}"
+    );
 
     // Interpolated sentences appear in the QML as fragments around the
     // count; pin the fragments that carry the meaning. Each is a contiguous

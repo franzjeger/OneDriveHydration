@@ -16,14 +16,15 @@ restarts (`systemctl --user restart plasma-plasmashell.service`).
 ## What it talks to
 
 `io.github.franzjeger.OneDriveHydration` on the session bus — the surface
-`onedrive-hydration-dbus` serves. It subscribes to `StateChanged` and never
-polls; one cold `GetAll` when the service (re)appears is the documented
-complement to the signal, because a freshly started service does not signal
-a state it considers unchanged. Eviction — deliberately absent from the tray
-menu because it needs a file picker — lives here: "Free Up Space…" opens the
-native picker rooted at the sync folder and calls `Evict` with the path made
-relative to it. A daemon refusal comes back as the named `Error.Kept` and is
-shown with the daemon's reason verbatim.
+`onedrive-hydration-dbus` serves. It subscribes to `StateChanged` and
+`CredentialStateChanged` and never polls; one cold `GetAll` when the service
+(re)appears is the documented complement to the signals, because a freshly
+started service does not signal a state it considers unchanged. Eviction —
+deliberately absent from the tray menu because it needs a file picker —
+lives here: "Free Up Space…" opens the native picker rooted at the sync
+folder and calls `Evict` with the path made relative to it. A daemon refusal
+comes back as the named `Error.Kept` and is shown with the daemon's reason
+verbatim.
 
 The wording of every state is copied from `tray.rs` verbatim, and
 `crates/onedrive-daemon/tests/plasmoid_package.rs` pins the two against each
@@ -57,9 +58,10 @@ a live bus — see below.
 
 On Plasma, this plasmoid *is* the tray presence: same icons, same states,
 same precedence (service absent, daemon stopped, exposures — rendered
-`NeedsAttention` — unsent, synced), plus the flyout. Running
-`onedrive-hydration-tray` at the same time shows a second, independent icon;
-the SNI binary remains the presence for desktops without plasmashell.
+`NeedsAttention` — sign-in required — also `NeedsAttention` — unsent,
+synced), plus the flyout. Running `onedrive-hydration-tray` at the same time
+shows a second, independent icon; the SNI binary remains the presence for
+desktops without plasmashell.
 
 ## What the D-Bus surface cannot answer yet
 
@@ -72,9 +74,15 @@ Built deliberately against what exists rather than inventing data:
   so "how much disk would hydrating cost" cannot be shown.
 * No account identity, no quota, no per-file transfer progress, no recent
   activity, no conflict list.
-* Nothing about credential health, which is what a re-authentication UX
-  would need: a signed-in/expired state, a signal when it changes, and a way
-  to start enrollment. Re-auth is out of scope here and waits on that.
+* Credential health is now on the surface (`CredentialState`, with
+  `CredentialStateChanged`) and shown — "Sign-in required" names
+  `tools/pkce-enroll.py`, the enrollment that works on this deployment,
+  because Conditional Access blocks the daemon's device-code flow. What the
+  flyout still cannot do is *start* enrollment: an in-product sign-in flow
+  waits on the PKCE threat-model review (docs/ROADMAP.md M1), and the flyout
+  does not even know the daemon's client id. There is deliberately no
+  sign-in button — a button that cannot do the thing it names is worse than
+  a sentence that can be followed.
 
 Widening the surface is its own task with its own measurements; this flyout
 shows everything the surface can currently say and nothing it cannot.

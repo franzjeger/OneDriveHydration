@@ -35,6 +35,7 @@
 //! binary intentionally does not link. It belongs to the flyout, which owns
 //! that decision.
 
+use crate::auth_state::CredentialState;
 use crate::dbus::{DaemonState, BUS_NAME, INTERFACE, OBJECT_PATH};
 use std::collections::HashMap;
 use std::io;
@@ -103,6 +104,21 @@ fn placeholders_line(excluded: u64) -> String {
     }
 }
 
+/// The caveat appended to every running-state detail while the daemon
+/// reports it cannot persist the rotated credential. A caveat and not a
+/// state of its own: syncing still works, so the headline stays about the
+/// work, and the future cost travels in the sentence that names the fix.
+fn store_caveat(credential: CredentialState) -> &'static str {
+    match credential {
+        CredentialState::Unsaved => {
+            " Warning: the sign-in works but its rotation could not be saved to Linux Secret \
+             Service — unlock the keyring, or the next daemon start may require signing in \
+             again."
+        }
+        _ => "",
+    }
+}
+
 /// Map what we know to what the panel shows. `None` means the state service
 /// itself is not on the bus, which is worth distinguishing from a reachable
 /// service reporting a stopped daemon: they name different processes to
@@ -112,18 +128,35 @@ fn placeholders_line(excluded: u64) -> String {
 ///
 /// 1. Service absent — nothing else is knowable.
 /// 2. Daemon not running — the counters are last-seen values, so they are
-///    only quoted ("before it stopped"), never presented as current.
+///    only quoted ("before it stopped"), never presented as current. The
+///    credential state is not even quoted: a stopped daemon cannot tell a
+///    missing credential from a locked keyring, and a sign-in instruction
+///    backed by a dead process would send someone to re-enroll over a
+///    keyring that merely has not unlocked yet.
 /// 3. Exposures — a warning state that outranks progress: another mount
 ///    exposes the sync files, reads through it bypass hydration entirely and
 ///    can silently return placeholder zeros instead of content (HydrationAPI
 ///    DESIGN.md §6.4a). The framework can detect this but not prevent it,
-///    which is exactly why the tray must not sit on it.
-/// 4. Unsent changes — ordinary work in flight.
-/// 5. Synced.
+///    which is exactly why the tray must not sit on it. It also outranks the
+///    sign-in state: exposure corrupts reads happening now, a dead sign-in
+///    merely stops sync loudly.
+/// 4. Sign-in required — the service has conclusively refused the stored
+///    credential (measured semantics: `MAX_REJECTIONS` consecutive
+///    `invalid_grant`s, nothing less). Only the *running* daemon asserts
+///    this, so showing it never contradicts rule 2.
+/// 5. Unsent changes — ordinary work in flight.
+/// 6. Synced.
 ///
 /// Wording rule for the stopped states: the files are *unreachable*, not
 /// lost, and the text says so explicitly rather than leaving a scary blank.
-pub fn present(state: Option<DaemonState>) -> Presentation {
+/// The signed-out state follows the same rule — a signed-out client has
+/// lost nothing either — and names the tool that actually works on this
+/// deployment (`tools/pkce-enroll.py`; Conditional Access blocks the
+/// daemon's own device-code flow). There is deliberately no sign-in button
+/// anywhere: the surface cannot run a browser flow, and a button that
+/// cannot do the thing it names is worse than a sentence that can be
+/// followed.
+pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Presentation {
     let Some(state) = state else {
         return Presentation {
             icon: ICON_STOPPED,
@@ -175,10 +208,33 @@ pub fn present(state: Option<DaemonState>) -> Presentation {
                 count(state.unsent, "change is", "changes are")
             ));
         }
+        detail.push_str(store_caveat(credential));
         return Presentation {
             icon: ICON_EXPOSED,
             sni_status: "NeedsAttention",
             headline,
+            detail,
+        };
+    }
+    if credential == CredentialState::Rejected {
+        let mut detail = "OneDrive no longer accepts this machine's saved sign-in — it was \
+                          revoked, expired, or invalidated by a password change or policy. \
+                          Nothing is lost: every synced file is still in OneDrive, but nothing \
+                          syncs and cloud-only files cannot be opened until you sign in again. \
+                          Sign in from a terminal with tools/pkce-enroll.py (Conditional Access \
+                          blocks the built-in device-code sign-in here); the daemon adopts it \
+                          and restarts by itself."
+            .to_owned();
+        if state.unsent > 0 {
+            detail.push_str(&format!(
+                " {} still waiting to upload.",
+                count(state.unsent, "change is", "changes are")
+            ));
+        }
+        return Presentation {
+            icon: ICON_STOPPED,
+            sni_status: "NeedsAttention",
+            headline: "Sign-in required".to_owned(),
             detail,
         };
     }
@@ -188,9 +244,10 @@ pub fn present(state: Option<DaemonState>) -> Presentation {
             sni_status: "Active",
             headline: format!("{} to upload", count(state.unsent, "change", "changes")),
             detail: format!(
-                "{} not reached OneDrive yet.{}",
+                "{} not reached OneDrive yet.{}{}",
                 count(state.unsent, "local change has", "local changes have"),
-                placeholders_line(state.excluded)
+                placeholders_line(state.excluded),
+                store_caveat(credential)
             ),
         };
     }
@@ -199,8 +256,9 @@ pub fn present(state: Option<DaemonState>) -> Presentation {
         sni_status: "Active",
         headline: "Up to date".to_owned(),
         detail: format!(
-            "All local changes are in OneDrive.{}",
-            placeholders_line(state.excluded)
+            "All local changes are in OneDrive.{}{}",
+            placeholders_line(state.excluded),
+            store_caveat(credential)
         ),
     }
 }
@@ -287,7 +345,9 @@ impl StatusNotifierItem {
         "OneDrive Hydration"
     }
 
-    /// `"NeedsAttention"` only for the exposure hazard; see [`present`].
+    /// `"NeedsAttention"` for the two states a person must act on — the
+    /// exposure hazard and a sign-in the service has refused; see
+    /// [`present`].
     #[zbus(property)]
     fn status(&self) -> &str {
         self.presentation.sni_status
@@ -337,11 +397,13 @@ impl StatusNotifierItem {
         Vec::new()
     }
 
-    /// Constant: the exposure hazard is the only attention state, so the
-    /// attention icon never needs to change with it.
+    /// The attention states keep their own icons — exposed for the exposure
+    /// hazard, stopped for a refused sign-in — so this follows the item
+    /// icon rather than pinning one hazard's artwork on every alarm. Hosts
+    /// only consult it while `Status` is `"NeedsAttention"`.
     #[zbus(property)]
     fn attention_icon_name(&self) -> &str {
-        ICON_EXPOSED
+        self.presentation.icon
     }
 
     #[zbus(property)]
@@ -412,6 +474,8 @@ const MENU_QUIT: i32 = 5;
 enum TrayEvent {
     /// A `StateChanged` signal arrived from the state service.
     State(DaemonState),
+    /// A `CredentialStateChanged` signal arrived from the state service.
+    Credential(CredentialState),
     /// The state service left the bus.
     ServiceGone,
     /// The state service (re)appeared on the bus; re-read its properties.
@@ -671,6 +735,9 @@ fn apply_presentation(
     zbus::block_on(async {
         if previous.icon != presentation.icon {
             StatusNotifierItem::new_icon(emitter).await?;
+            // The attention icon follows the item icon (see
+            // `attention_icon_name`), so it changed with it.
+            StatusNotifierItem::new_attention_icon(emitter).await?;
         }
         if previous.sni_status != presentation.sni_status {
             StatusNotifierItem::new_status(emitter, presentation.sni_status).await?;
@@ -723,6 +790,25 @@ fn read_service_state(connection: &zbus::blocking::Connection) -> Option<DaemonS
         excluded: proxy.get_property::<u64>("Excluded").ok()?,
         exposures: proxy.get_property::<u64>("Exposures").ok()?,
     })
+}
+
+/// The credential half of the cold read. Separate from
+/// [`read_service_state`] and infallible on purpose: a state service built
+/// before `CredentialState` existed still serves the four properties above,
+/// and this tray must keep working against it — a missing property is
+/// exactly "nobody has asserted anything", which already has a word.
+fn read_credential_state(connection: &zbus::blocking::Connection) -> CredentialState {
+    let proxy: Option<zbus::blocking::Proxy<'_>> = zbus::blocking::proxy::Builder::new(connection)
+        .destination(BUS_NAME)
+        .ok()
+        .and_then(|b| b.path(OBJECT_PATH).ok())
+        .and_then(|b| b.interface(INTERFACE).ok())
+        .map(|b| b.cache_properties(zbus::proxy::CacheProperties::No))
+        .and_then(|b| b.build().ok());
+    proxy
+        .and_then(|p| p.get_property::<String>("CredentialState").ok())
+        .map(|value| CredentialState::from_wire(&value))
+        .unwrap_or(CredentialState::Unknown)
 }
 
 /// Hand the watcher our unique name; it looks for the item at [`ITEM_PATH`].
@@ -779,7 +865,7 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
         .at(
             ITEM_PATH,
             StatusNotifierItem {
-                presentation: present(None),
+                presentation: present(None, CredentialState::Unknown),
                 opener: Arc::clone(&opener),
             },
         )
@@ -788,7 +874,7 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
         .at(
             MENU_PATH,
             DBusMenu {
-                headline: present(None).headline,
+                headline: present(None, CredentialState::Unknown).headline,
                 opener,
                 events: events.clone(),
                 revision: 1,
@@ -817,6 +903,9 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
     let state_signals = state_proxy
         .receive_signal("StateChanged")
         .map_err(io::Error::other)?;
+    let credential_signals = state_proxy
+        .receive_signal("CredentialStateChanged")
+        .map_err(io::Error::other)?;
     let service_owner_changes = fdo
         .receive_name_owner_changed_with_args(&[(0, BUS_NAME)])
         .map_err(io::Error::other)?;
@@ -843,6 +932,20 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
             }
         }
         drop(state_events.send(TrayEvent::BusLost));
+    });
+    let credential_events = events.clone();
+    thread::spawn(move || {
+        for message in credential_signals {
+            if let Ok((value,)) = message.body().deserialize::<(String,)>() {
+                if credential_events
+                    .send(TrayEvent::Credential(CredentialState::from_wire(&value)))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
+        drop(credential_events.send(TrayEvent::BusLost));
     });
     let service_events = events.clone();
     thread::spawn(move || {
@@ -877,7 +980,14 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
         drop(watcher_events.send(TrayEvent::BusLost));
     });
 
-    apply_presentation(&sni, &menu, &present(read_service_state(&connection)))
+    // What the loop below renders: the last state and credential the
+    // service told us, updated by signals and re-read when the service
+    // returns to the bus. Two variables rather than one struct because they
+    // arrive on two signals and go stale together only when the service
+    // itself goes away.
+    let mut daemon_state = read_service_state(&connection);
+    let mut credential = read_credential_state(&connection);
+    apply_presentation(&sni, &menu, &present(daemon_state, credential))
         .map_err(io::Error::other)?;
 
     // Register only now, with the objects served and current: a watcher that
@@ -900,13 +1010,26 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
     loop {
         match event_queue.recv() {
             Ok(TrayEvent::State(state)) => {
-                apply_presentation(&sni, &menu, &present(Some(state))).map_err(io::Error::other)?;
+                daemon_state = Some(state);
+                apply_presentation(&sni, &menu, &present(daemon_state, credential))
+                    .map_err(io::Error::other)?;
+            }
+            Ok(TrayEvent::Credential(state)) => {
+                credential = state;
+                apply_presentation(&sni, &menu, &present(daemon_state, credential))
+                    .map_err(io::Error::other)?;
             }
             Ok(TrayEvent::ServiceGone) => {
-                apply_presentation(&sni, &menu, &present(None)).map_err(io::Error::other)?;
+                // Nothing the service asserted survives it leaving the bus.
+                daemon_state = None;
+                credential = CredentialState::Unknown;
+                apply_presentation(&sni, &menu, &present(daemon_state, credential))
+                    .map_err(io::Error::other)?;
             }
             Ok(TrayEvent::ServiceReturned) => {
-                apply_presentation(&sni, &menu, &present(read_service_state(&connection)))
+                daemon_state = read_service_state(&connection);
+                credential = read_credential_state(&connection);
+                apply_presentation(&sni, &menu, &present(daemon_state, credential))
                     .map_err(io::Error::other)?;
             }
             Ok(TrayEvent::WatcherReturned) => {
@@ -945,10 +1068,15 @@ mod tests {
         }
     }
 
+    /// Most states do not depend on the credential; spell that out once.
+    fn shown(state: Option<DaemonState>) -> Presentation {
+        present(state, CredentialState::Unknown)
+    }
+
     #[test]
     fn a_missing_service_and_a_stopped_daemon_are_different_states() {
-        let service_gone = present(None);
-        let daemon_stopped = present(Some(state(false, 0, 0, 0)));
+        let service_gone = shown(None);
+        let daemon_stopped = shown(Some(state(false, 0, 0, 0)));
         assert_eq!(service_gone.icon, ICON_STOPPED);
         assert_eq!(daemon_stopped.icon, ICON_STOPPED);
         assert_ne!(service_gone.headline, daemon_stopped.headline);
@@ -958,7 +1086,7 @@ mod tests {
 
     #[test]
     fn stopped_states_say_files_are_unreachable_not_lost() {
-        for p in [present(None), present(Some(state(false, 3, 10, 0)))] {
+        for p in [shown(None), shown(Some(state(false, 3, 10, 0)))] {
             assert!(
                 p.detail.contains("nothing is lost") || p.detail.contains("Nothing is lost"),
                 "stopped detail must say nothing is lost: {:?}",
@@ -969,19 +1097,19 @@ mod tests {
 
     #[test]
     fn a_stopped_daemon_quotes_held_exposures_as_past_not_current() {
-        let p = present(Some(state(false, 0, 0, 2)));
+        let p = shown(Some(state(false, 0, 0, 2)));
         assert_eq!(p.icon, ICON_STOPPED);
         assert_eq!(p.sni_status, "Active");
         assert!(p.detail.contains("Before it stopped, 2 other mounts"));
         // But a clean stop mentions no exposures at all.
-        assert!(!present(Some(state(false, 0, 0, 0)))
+        assert!(!shown(Some(state(false, 0, 0, 0)))
             .detail
             .contains("Before it stopped"));
     }
 
     #[test]
     fn exposures_outrank_unsent_and_demand_attention() {
-        let p = present(Some(state(true, 5, 100, 1)));
+        let p = shown(Some(state(true, 5, 100, 1)));
         assert_eq!(p.icon, ICON_EXPOSED);
         assert_eq!(p.sni_status, "NeedsAttention");
         assert_eq!(p.headline, "1 mount bypasses hydration");
@@ -989,31 +1117,38 @@ mod tests {
         // The unsent work is still reported, just not as the headline.
         assert!(p.detail.contains("5 changes are still waiting to upload"));
 
-        let plural = present(Some(state(true, 0, 0, 3)));
+        let plural = shown(Some(state(true, 0, 0, 3)));
         assert_eq!(plural.headline, "3 mounts bypass hydration");
         assert!(!plural.detail.contains("waiting to upload"));
     }
 
     #[test]
-    fn only_exposures_demand_attention() {
+    fn attention_is_for_exposures_and_a_refused_sign_in_only() {
         for p in [
-            present(None),
-            present(Some(state(false, 0, 0, 1))),
-            present(Some(state(true, 4, 2, 0))),
-            present(Some(state(true, 0, 2, 0))),
+            shown(None),
+            shown(Some(state(false, 0, 0, 1))),
+            shown(Some(state(true, 4, 2, 0))),
+            shown(Some(state(true, 0, 2, 0))),
+            present(Some(state(true, 0, 2, 0)), CredentialState::Unsaved),
         ] {
             assert_eq!(p.sni_status, "Active", "{:?}", p.headline);
+        }
+        for p in [
+            present(Some(state(true, 0, 0, 1)), CredentialState::Healthy),
+            present(Some(state(true, 0, 0, 0)), CredentialState::Rejected),
+        ] {
+            assert_eq!(p.sni_status, "NeedsAttention", "{:?}", p.headline);
         }
     }
 
     #[test]
     fn unsent_counts_read_naturally_in_both_numbers() {
-        let one = present(Some(state(true, 1, 0, 0)));
+        let one = shown(Some(state(true, 1, 0, 0)));
         assert_eq!(one.icon, ICON_UNSENT);
         assert_eq!(one.headline, "1 change to upload");
         assert!(one.detail.contains("1 local change has not reached"));
 
-        let many = present(Some(state(true, 12, 1, 0)));
+        let many = shown(Some(state(true, 12, 1, 0)));
         assert_eq!(many.headline, "12 changes to upload");
         assert!(many.detail.contains("12 local changes have not reached"));
         assert!(many.detail.contains("1 file is a cloud-only placeholder."));
@@ -1021,16 +1156,120 @@ mod tests {
 
     #[test]
     fn synced_reports_up_to_date_and_the_placeholder_population() {
-        let p = present(Some(state(true, 0, 146820, 0)));
+        let p = shown(Some(state(true, 0, 146820, 0)));
         assert_eq!(p.icon, ICON_SYNCED);
         assert_eq!(p.headline, "Up to date");
         assert!(p
             .detail
             .contains("146820 files are cloud-only placeholders."));
         // A drive with nothing dehydrated gets no placeholder line.
-        assert!(!present(Some(state(true, 0, 0, 0)))
+        assert!(!shown(Some(state(true, 0, 0, 0)))
             .detail
             .contains("placeholder"));
+    }
+
+    #[test]
+    fn sign_in_required_says_nothing_is_lost_and_names_the_tool_that_works() {
+        let p = present(Some(state(true, 0, 7, 0)), CredentialState::Rejected);
+        assert_eq!(p.headline, "Sign-in required");
+        assert_eq!(p.icon, ICON_STOPPED);
+        assert_eq!(p.sni_status, "NeedsAttention");
+        // The register the stopped states established: unreachable, not lost.
+        assert!(p.detail.contains("Nothing is lost"), "{}", p.detail);
+        // The instruction must be one that works on this deployment —
+        // Conditional Access blocks the daemon's device-code flow, so the
+        // browser enrollment tool is named, and the wording says why.
+        assert!(p.detail.contains("tools/pkce-enroll.py"), "{}", p.detail);
+        assert!(p.detail.contains("Conditional Access"), "{}", p.detail);
+        // And what happens next, because the daemon really does restart
+        // itself once the enrollment file appears.
+        assert!(p.detail.contains("restarts by itself"), "{}", p.detail);
+
+        // Unsent work is still reported, the way the exposure arm does it.
+        let busy = present(Some(state(true, 4, 0, 0)), CredentialState::Rejected);
+        assert!(
+            busy.detail
+                .contains("4 changes are still waiting to upload"),
+            "{}",
+            busy.detail
+        );
+    }
+
+    #[test]
+    fn exposures_outrank_a_refused_sign_in() {
+        // Exposure corrupts reads happening now; a dead sign-in stops sync
+        // loudly. The one a person must see first is the quiet one.
+        let p = present(Some(state(true, 0, 0, 1)), CredentialState::Rejected);
+        assert_eq!(p.icon, ICON_EXPOSED);
+        assert_eq!(p.headline, "1 mount bypasses hydration");
+    }
+
+    #[test]
+    fn a_stopped_daemon_never_renders_a_held_sign_in_state() {
+        // The service resets its credential property to "unknown" when the
+        // daemon dies, but this mapping must not depend on that: a stopped
+        // daemon cannot tell a missing credential from a locked keyring,
+        // and a re-enroll instruction over a locked keyring is the exact
+        // wrong message this surface exists to avoid.
+        let p = present(Some(state(false, 0, 0, 0)), CredentialState::Rejected);
+        assert_eq!(p.headline, "Sync daemon not running");
+        assert!(!p.detail.contains("pkce-enroll"), "{}", p.detail);
+        let gone = present(None, CredentialState::Rejected);
+        assert_eq!(gone.headline, "State service not running");
+    }
+
+    #[test]
+    fn an_unsaved_rotation_is_a_caveat_on_every_running_state_not_a_state() {
+        for base in [
+            state(true, 0, 0, 0), // synced
+            state(true, 2, 0, 0), // unsent
+            state(true, 0, 0, 1), // exposed
+        ] {
+            let plain = present(Some(base), CredentialState::Healthy);
+            let unsaved = present(Some(base), CredentialState::Unsaved);
+            assert_eq!(
+                plain.headline, unsaved.headline,
+                "the headline stays about the work"
+            );
+            assert!(
+                unsaved
+                    .detail
+                    .contains("could not be saved to Linux Secret Service"),
+                "{}",
+                unsaved.detail
+            );
+            assert!(
+                unsaved.detail.contains("unlock the keyring"),
+                "{}",
+                unsaved.detail
+            );
+        }
+        // Not on the stopped state (held knowledge), and not on rejection
+        // (the credential is dead; whether it was being saved is history).
+        for p in [
+            present(Some(state(false, 0, 0, 0)), CredentialState::Unsaved),
+            present(Some(state(true, 0, 0, 0)), CredentialState::Rejected),
+        ] {
+            assert!(!p.detail.contains("could not be saved"), "{}", p.detail);
+        }
+    }
+
+    #[test]
+    fn an_unknown_credential_presents_exactly_like_a_healthy_one() {
+        // "Unknown" is the older-daemon and just-restarted case; nagging on
+        // it would nag on every deployment that has not upgraded yet.
+        for base in [
+            None,
+            Some(state(false, 1, 2, 3)),
+            Some(state(true, 0, 0, 0)),
+            Some(state(true, 5, 2, 0)),
+            Some(state(true, 0, 0, 2)),
+        ] {
+            assert_eq!(
+                present(base, CredentialState::Unknown),
+                present(base, CredentialState::Healthy)
+            );
+        }
     }
 
     fn menu(mount: Option<PathBuf>) -> DBusMenu {

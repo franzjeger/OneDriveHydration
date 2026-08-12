@@ -1,3 +1,4 @@
+pub mod auth_state;
 pub mod dbus;
 pub mod tray;
 
@@ -312,30 +313,44 @@ pub fn token_cache(config: AuthConfig, state_dir: &Path) -> io::Result<SharedTok
     )))
 }
 
+/// Adopt a credential file left in the state directory, then remove it.
+///
+/// Two writers produce that file and both mean the same thing: the
+/// file-backed alpha (once, on upgrade), and enrollment tooling —
+/// `tools/pkce-enroll.py` — every time someone signs in from a browser
+/// because Conditional Access blocks the daemon's device-code flow. The
+/// daemon consumes the file on every start, so its presence means an
+/// enrollment happened *after* the last start, and the file is therefore
+/// newer than anything in the secure store by construction.
+///
+/// The file wins over a stored credential on purpose, and this reverses an
+/// earlier rule ("the secure credential wins over a stale legacy file").
+/// That rule had exactly one reachable consequence: when the service had
+/// rejected the stored credential — the one situation in which anyone
+/// re-enrolls — the fresh sign-in was deleted unread and the dead credential
+/// kept, so following the product's own re-authentication instructions
+/// landed the user back where they started, minus the sign-in they had just
+/// completed. A genuinely stale file (a restored state-dir backup) costs a
+/// few `invalid_grant`s and a visible "sign-in required", which is the same
+/// recovery path and loses nothing.
 fn migrate_legacy_credential(store: &dyn CredentialStore, legacy_path: &Path) -> io::Result<()> {
-    let legacy = FileCredentialStore::new(legacy_path);
-    let secure_exists = store.load()?.is_some();
-    if !secure_exists {
-        if legacy_path.exists() {
-            let metadata = fs::symlink_metadata(legacy_path)?;
-            if !metadata.file_type().is_file()
-                || metadata.file_type().is_symlink()
-                || metadata.permissions().mode() & 0o077 != 0
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "legacy credential is not a private regular file",
-                ));
-            }
-        }
-        if let Some(refresh) = legacy.load()? {
-            store.save(&refresh)?;
-        } else {
-            return Ok(());
-        }
-    } else if !legacy_path.exists() {
+    if !legacy_path.exists() {
         return Ok(());
     }
+    let metadata = fs::symlink_metadata(legacy_path)?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "legacy credential is not a private regular file",
+        ));
+    }
+    let Some(refresh) = FileCredentialStore::new(legacy_path).load()? else {
+        return Ok(());
+    };
+    store.save(&refresh)?;
 
     // The secure write above completed before plaintext removal. Failing to
     // remove or durably record the removal is an error, not a silent warning.
@@ -347,6 +362,27 @@ fn migrate_legacy_credential(store: &dyn CredentialStore, legacy_path: &Path) ->
         )
     })?;
     fs::File::open(parent)?.sync_all()
+}
+
+/// What the auth-state publisher needs to know about a possible enrollment
+/// file without reading it: is it adoptable, and has it stopped changing?
+///
+/// Metadata only, deliberately. The publisher's job is to notice that a
+/// fresh enrollment exists and restart the daemon so the startup path —
+/// [`migrate_legacy_credential`], the only code that reads credential bytes
+/// — adopts it; a second reader of the credential would be a second thing
+/// to audit. The size/mtime pair is how the publisher tells a settled file
+/// from one the enrollment tool is still writing.
+pub(crate) fn enrollment_snapshot(path: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    let private_regular = metadata.file_type().is_file()
+        && !metadata.file_type().is_symlink()
+        && metadata.permissions().mode() & 0o077 == 0
+        && metadata.len() > 0;
+    if !private_regular {
+        return None;
+    }
+    Some((metadata.len(), metadata.modified().ok()?))
 }
 
 pub fn discover_drive(transport: &mut impl Transport) -> io::Result<DriveProfile> {
@@ -614,22 +650,72 @@ mod tests {
     }
 
     #[test]
-    fn secure_credential_wins_over_stale_legacy_file() {
+    fn a_fresh_enrollment_replaces_the_stored_credential() {
+        // The situation this models is the only one that produces both at
+        // once: the service rejected the stored credential, the user signed
+        // in again with tools/pkce-enroll.py, and the daemon restarted. The
+        // file is the enrollment; deleting it and keeping the rejected
+        // credential — the previous rule — made the product's own
+        // re-authentication instructions a trap.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("refresh-token");
         FileCredentialStore::new(&path)
-            .save(&RefreshToken::new("stale-legacy"))
+            .save(&RefreshToken::new("fresh-enrollment"))
             .unwrap();
         let store = SecretServiceCredentialStore(MemorySecret::default());
-        store.save(&RefreshToken::new("secure-current")).unwrap();
+        store
+            .save(&RefreshToken::new("rejected-by-the-service"))
+            .unwrap();
 
         migrate_legacy_credential(&store, &path).unwrap();
 
         assert!(!path.exists());
         assert_eq!(
             store.load().unwrap().unwrap().expose_for_storage(),
+            "fresh-enrollment"
+        );
+    }
+
+    #[test]
+    fn a_stored_credential_is_kept_when_there_is_no_enrollment_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SecretServiceCredentialStore(MemorySecret::default());
+        store.save(&RefreshToken::new("secure-current")).unwrap();
+
+        migrate_legacy_credential(&store, &dir.path().join("refresh-token")).unwrap();
+
+        assert_eq!(
+            store.load().unwrap().unwrap().expose_for_storage(),
             "secure-current"
         );
+    }
+
+    #[test]
+    fn enrollment_snapshot_accepts_only_a_settled_private_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("refresh-token");
+
+        // Absent: nothing to adopt.
+        assert!(enrollment_snapshot(&path).is_none());
+
+        // Empty: the enrollment tool never writes an empty file, so this is
+        // a write in progress or a crashed one — not adoptable.
+        fs::write(&path, "").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(enrollment_snapshot(&path).is_none());
+
+        // Group/other-readable: the migration would refuse it at startup,
+        // so restarting the daemon over it would take the daemon down.
+        fs::write(&path, "token-bytes").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(enrollment_snapshot(&path).is_none());
+
+        // Private and non-empty: adoptable, and the snapshot is what the
+        // publisher compares across polls to see the file settle.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let first = enrollment_snapshot(&path).expect("a private file has a snapshot");
+        assert_eq!(first.0, "token-bytes".len() as u64);
+        assert_eq!(enrollment_snapshot(&path), Some(first));
     }
 
     #[test]

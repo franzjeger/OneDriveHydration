@@ -13,11 +13,14 @@ security boundary.
 
 Early integration work. The daemon has device-code enrollment backed by Linux Secret Service,
 automatic primary-drive discovery, reviewed GraphAccess wiring, constant-memory streamed
-downloads and fail-closed QuickXorHash verification, a D-Bus state service and tray, and a
+downloads and fail-closed QuickXorHash verification, a D-Bus state service and tray, a
 validated systemd installer that refuses deployments which would fail open
 (see [packaging/systemd](packaging/systemd/README.md)), and a Plasma flyout plasmoid with
-eviction. The re-authentication UX and Dolphin integration are not yet built. It is not
-ready for user data.
+eviction. The daemon now says whether it is signed in — a credential state on its own
+socket and on the D-Bus surface, shown by the tray and flyout with the enrollment
+instruction that works here — but in-product (re-)enrollment still waits on the PKCE
+threat-model review, and Dolphin integration is not yet built. It is not ready for user
+data.
 
 ## Design rules
 
@@ -42,9 +45,15 @@ Enroll once; the refresh token is stored in the desktop's Linux Secret Service c
 The command fails closed when no Secret Service provider is available or the collection cannot
 be unlocked; it never falls back to a plaintext token file.
 
-On first start after upgrading from the file-backed alpha, an existing `refresh-token` file in
-the state directory is migrated into Secret Service and removed only after the secure write
-succeeds. A migration error stops startup.
+At every start, a `refresh-token` file in the state directory — the file-backed alpha's, or
+one freshly written by `tools/pkce-enroll.py` — is adopted: written into Secret Service,
+*replacing* any stored credential, and removed only after the secure write succeeds. The file
+wins on purpose: the daemon consumes it on every start, so its presence means an enrollment
+happened since the last start, and the one situation that produces both at once is a stored
+credential the service has rejected plus the fresh sign-in that fixes it. A migration error
+stops startup. While running signed-out (the service refused the stored credential), the
+daemon watches for that file and, once it has settled, exits so its systemd unit restarts it
+onto the new sign-in — enrollment while the daemon runs therefore needs no manual restart.
 
 ```text
 cargo run -p onedrive-hydration-daemon -- auth \
@@ -89,8 +98,19 @@ cargo run -p onedrive-hydration-daemon --bin onedrive-hydration-dbus
 It owns `io.github.franzjeger.OneDriveHydration` and serves, at the object path of the same
 name, `DaemonRunning`, `Unsent`, `Excluded` and `Exposures` properties, an `Evict(path)`
 method with named errors, and a `StateChanged` signal that fires once per distinct state.
-While the daemon is down the service keeps running and reports `DaemonRunning` false; when the
-daemon restarts it reconnects on its own with bounded backoff. Eviction over the bus is held
+It also serves `CredentialState` — `healthy`, `unsaved` (syncing works but the rotated
+sign-in cannot be written to Secret Service), `rejected` (the service has conclusively
+refused the stored sign-in), or `unknown` when no running daemon has asserted one — with a
+`CredentialStateChanged` signal of its own; a new argument on `StateChanged` would have
+broken subscribers that decode it by signature, so the contract grows by new members only,
+and readers treat unrecognised `CredentialState` values as `unknown`. The conclusion comes
+from the daemon's second owner-only socket (`onedrive-hydration.auth`, same line protocol
+as the control socket), where `onedrive-hydrationctl status` also reads it. While the
+daemon is down the service keeps running and reports `DaemonRunning` false — and
+`CredentialState` returns to `unknown` rather than being held, because a sign-in
+instruction backed by a dead process is the wrong message: a stopped daemon cannot tell a
+missing credential from a keyring that merely has not unlocked yet. When the daemon
+restarts it reconnects on its own with bounded backoff. Eviction over the bus is held
 to the same boundary as the socket: callers whose uid the bus cannot attribute to the daemon's
 owner are refused. Installed deployments never start this service eagerly: the installer
 writes a D-Bus activation file, and the session bus starts the service the first time
@@ -104,10 +124,16 @@ cargo run -p onedrive-hydration-daemon --bin onedrive-hydration-tray -- \
 ```
 
 It is a StatusNotifierItem with a DBusMenu, spoken directly over zbus with no GUI toolkit:
-the panel draws everything. Four states are shown, in order of precedence: daemon (or state
+the panel draws everything. Five states are shown, in order of precedence: daemon (or state
 service) not running, another mount exposing the sync files (`Exposures > 0`, rendered as
-`NeedsAttention` because reads through such a mount bypass hydration), changes waiting to
-upload, and up to date. Icons resolve by name from the hicolor theme; run
+`NeedsAttention` because reads through such a mount bypass hydration), sign-in required
+(`CredentialState` `rejected`, also `NeedsAttention`: nothing is lost, and the tooltip
+names `tools/pkce-enroll.py` because Conditional Access blocks the daemon's device-code
+flow on this deployment — deliberately a sentence and not a button, since the tray cannot
+run a browser flow), changes waiting to upload, and up to date. An `unsaved` credential is
+a warning sentence appended to whichever of the running states is shown, not a state of
+its own: syncing still works, and the sentence says what breaks (the next restart) and
+what to do (unlock the keyring). Icons resolve by name from the hicolor theme; run
 `packaging/icons/install-icons.sh` once per user to install them. On a desktop with no
 `org.kde.StatusNotifierWatcher` the binary exits saying so, and when the watcher restarts —
 plasmashell and kded6 do — it re-registers by itself. Eviction is deliberately absent from

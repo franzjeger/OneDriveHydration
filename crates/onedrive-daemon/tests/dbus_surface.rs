@@ -5,8 +5,10 @@
 //! socketpair keeps the test from ever being visible to, or influenced by,
 //! a real desktop session on the machine running it.
 
+use onedrive_hydration_daemon::auth_state::CredentialState;
 use onedrive_hydration_daemon::dbus::{
-    publish_state, ControlSurface, DaemonState, BUS_NAME, INTERFACE, OBJECT_PATH,
+    publish_credential, publish_state, ControlSurface, DaemonState, BUS_NAME, INTERFACE,
+    OBJECT_PATH,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -99,6 +101,56 @@ fn properties_update_and_state_changed_fires_once_per_publish() {
     assert_eq!(proxy.get_property::<u64>("Unsent").unwrap(), 5);
     assert_eq!(proxy.get_property::<u64>("Excluded").unwrap(), 2);
     assert_eq!(proxy.get_property::<u64>("Exposures").unwrap(), 1);
+}
+
+#[test]
+fn credential_state_is_a_property_and_a_signal_of_its_own() {
+    let (server, client) = served_pair(ControlSurface::new(PathBuf::from("/nonexistent"), None));
+    let proxy = tray_proxy(&client);
+
+    // Before any daemon has asserted anything, the property answers
+    // "unknown" — the word for a cold read against a stopped daemon or one
+    // that predates the auth-state socket.
+    assert_eq!(
+        proxy.get_property::<String>("CredentialState").unwrap(),
+        "unknown"
+    );
+
+    // Subscribe first, publish second, so the signal cannot be missed —
+    // and subscribe to StateChanged too, to pin that a credential publish
+    // does not leak onto the counter signal existing subscribers decode
+    // with a fixed signature.
+    let mut credential_signals = proxy.receive_signal("CredentialStateChanged").unwrap();
+    let mut state_signals = proxy.receive_signal("StateChanged").unwrap();
+    let iface = server
+        .object_server()
+        .interface::<_, ControlSurface>(OBJECT_PATH)
+        .unwrap();
+    publish_credential(&iface, CredentialState::Rejected).unwrap();
+
+    let msg = credential_signals.next().unwrap();
+    let (value,): (String,) = msg.body().deserialize().unwrap();
+    assert_eq!(value, "rejected");
+    assert_eq!(
+        proxy.get_property::<String>("CredentialState").unwrap(),
+        "rejected"
+    );
+
+    // The counter signal fires only for counters: publish one state now and
+    // assert it is the *first* StateChanged to arrive.
+    publish_state(
+        &iface,
+        DaemonState {
+            daemon_running: true,
+            unsent: 1,
+            excluded: 2,
+            exposures: 0,
+        },
+    )
+    .unwrap();
+    let msg = state_signals.next().unwrap();
+    let body: (bool, u64, u64, u64) = msg.body().deserialize().unwrap();
+    assert_eq!(body, (true, 1, 2, 0));
 }
 
 #[test]

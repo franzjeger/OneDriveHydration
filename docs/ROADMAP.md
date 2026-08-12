@@ -33,5 +33,9 @@
 - [x] Validated systemd installer and units
 - [x] StatusNotifierItem tray icon and menu, signal-driven
 - [x] Flyout: system-tray plasmoid with eviction, signal-driven
-- [ ] Re-authentication UX (needs credential state on the D-Bus surface first)
+- [x] Credential state on the D-Bus surface (property + change signal), shown by
+      tray and flyout, with adopt-on-restart of a fresh `pkce-enroll.py` sign-in
+- [ ] In-product (re-)enrollment — blocked on M1's PKCE threat-model review; until
+      then the surfaces name `tools/pkce-enroll.py` and deliberately offer no
+      sign-in button
 - [ ] Dolphin actions and status overlays
