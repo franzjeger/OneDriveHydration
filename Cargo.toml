@@ -10,10 +10,12 @@ rust-version = "1.85"
 [workspace.dependencies]
 blocking = "1"
 libc = "0.2"
-hydration-client = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "d7f8624f7d57aec4abb752267c0abff9abf59545" }
-hydration-graph = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "d7f8624f7d57aec4abb752267c0abff9abf59545", features = ["http"] }
+hydration-client = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "f5bb5c21f4c753fd4310a3fd3977b92287fbf251" }
+hydration-graph = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "f5bb5c21f4c753fd4310a3fd3977b92287fbf251", features = ["http"] }
 keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
-rustix = { version = "1", features = ["process"] }
+# "event" is one zero-timeout poll: how the auth-state socket notices a
+# watcher hung up during a quiet stretch without reading from it.
+rustix = { version = "1", features = ["process", "event"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Newest zbus whose tree still builds on this workspace's rust-version;
