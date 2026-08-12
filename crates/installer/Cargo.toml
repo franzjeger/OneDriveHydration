@@ -1,0 +1,15 @@
+[package]
+name = "onedrive-hydration-install"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Validated systemd installer for the OneDrive hydration deployment"
+
+[dependencies]
+# The only dependency, and it is already in this workspace's tree. The probes
+# need uname, getpwnam_r and the two fanotify calls; everything else is std.
+libc.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -818,6 +818,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "onedrive-hydration-install"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
+]
+
+[[package]]
 name = "ordered-stream"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -13,8 +13,10 @@ security boundary.
 
 Early integration work. The daemon has device-code enrollment backed by Linux Secret Service,
 automatic primary-drive discovery, reviewed GraphAccess wiring, constant-memory streamed
-downloads and fail-closed QuickXorHash verification. Desktop integration, resumable ranges and
-packaging are not yet complete. It is not ready for user data.
+downloads and fail-closed QuickXorHash verification, a D-Bus state service and tray, and a
+validated systemd installer that refuses deployments which would fail open
+(see [packaging/systemd](packaging/systemd/README.md)). The flyout and re-authentication UX
+and Dolphin integration are not yet built. It is not ready for user data.
 
 ## Design rules
 

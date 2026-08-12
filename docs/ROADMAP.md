@@ -30,7 +30,7 @@
 - [x] Owner-only local status and eviction CLI
 - [x] D-Bus control surface
 - [x] Revision-matched Linux binary payload, including privileged helper
-- [ ] Validated systemd installer and units
+- [x] Validated systemd installer and units
 - [x] StatusNotifierItem tray icon and menu, signal-driven
 - [ ] Flyout and re-authentication UX
 - [ ] Dolphin actions and status overlays

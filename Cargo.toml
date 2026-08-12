@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/onedrive-daemon"]
+members = ["crates/onedrive-daemon", "crates/installer"]
 
 [workspace.package]
 edition = "2021"
@@ -9,6 +9,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 blocking = "1"
+libc = "0.2"
 hydration-client = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "d7f8624f7d57aec4abb752267c0abff9abf59545" }
 hydration-graph = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "d7f8624f7d57aec4abb752267c0abff9abf59545", features = ["http"] }
 keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }

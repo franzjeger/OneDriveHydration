@@ -35,6 +35,9 @@ jobs:
         run: |
           test -x target/release/onedrive-hydration-daemon
           test -x target/release/onedrive-hydrationctl
+          test -x target/release/onedrive-hydration-dbus
+          test -x target/release/onedrive-hydration-tray
+          test -x target/release/onedrive-hydration-install
           test -x .upstream/hydration-api/target/release/hydrationd
 
   supply-chain:
@@ -42,6 +45,74 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # The installer's refusals, fired against the real binary on a real machine.
+  # The unit-level proofs (bad template, synthetic mount tables, injected
+  # kernels) run in `cargo test` under the rust job; this job exercises the
+  # CLI end to end against conditions the runner genuinely has. What cannot
+  # run here is the all-checks-green install: runner kernels predate 6.14
+  # (no pre-content events) and runner sessions have no user D-Bus, so the
+  # kernel and secret-service checks refuse — which is itself the measurement
+  # this job asserts. The full pass is exercised on a real 6.14+ desktop
+  # (loop ext4 mount, live session bus); see packaging/systemd/README.md.
+  installer-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.85
+      - name: Build the installer
+        run: cargo build --locked -p onedrive-hydration-install
+      - name: A plain directory is refused, with the dirmark reason
+        run: |
+          mkdir -p /tmp/not-a-mount
+          set +e
+          out=$(./target/debug/onedrive-hydration-install install \
+            --user "$(id -un)" --mount /tmp/not-a-mount --client-id ci \
+            --dry-run --prefix /tmp/prefix)
+          rc=$?
+          set -e
+          echo "$out"
+          test "$rc" -eq 1
+          echo "$out" | grep -q "not a mount point"
+          echo "$out" | grep -q "delivers nothing"
+      - name: A tmpfs sync root is refused by name
+        run: |
+          set +e
+          out=$(./target/debug/onedrive-hydration-install install \
+            --user "$(id -un)" --mount /dev/shm --client-id ci \
+            --dry-run --prefix /tmp/prefix)
+          rc=$?
+          set -e
+          echo "$out"
+          test "$rc" -eq 1
+          echo "$out" | grep -q "tmpfs"
+          echo "$out" | grep -q "SB_I_ALLOW_HSM"
+      - name: The kernel check answers with a syscall measurement as root
+        run: |
+          truncate -s 64M /tmp/fs.img
+          mkfs.ext4 -q /tmp/fs.img
+          mkdir -p /tmp/loopmnt
+          sudo mount -o loop /tmp/fs.img /tmp/loopmnt
+          set +e
+          out=$(sudo ./target/debug/onedrive-hydration-install install \
+            --user "$(id -un)" --mount /tmp/loopmnt --client-id ci \
+            --dry-run --prefix /tmp/prefix)
+          rc=$?
+          set -e
+          echo "$out"
+          rel=$(uname -r); maj=${rel%%.*}; rest=${rel#*.}; min=${rest%%[!0-9]*}
+          if [ "$maj" -gt 6 ] || { [ "$maj" -eq 6 ] && [ "$min" -ge 14 ]; }; then
+            # New enough: the kernel check must PASS as a measurement, and the
+            # remaining refusal (no session bus for secret-service) still
+            # holds the door shut.
+            echo "$out" | grep -q "accepts FAN_PRE_ACCESS marks (measured)"
+          else
+            # Runner kernels predate pre-content events: the refusal must be
+            # the measured EINVAL, not a version guess.
+            test "$rc" -eq 1
+            echo "$out" | grep -q "rejected FAN_PRE_ACCESS with EINVAL"
+          fi
+          sudo umount /tmp/loopmnt
 
   msrv:
     runs-on: ubuntu-latest
