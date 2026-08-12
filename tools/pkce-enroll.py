@@ -151,7 +151,21 @@ def main() -> None:
     state = secrets.token_urlsafe(16)
 
     port = free_port()
-    redirect_uri = f"http://localhost:{port}"
+    # `127.0.0.1` literally, never the name `localhost`.
+    #
+    # Measured on this machine: `getaddrinfo("localhost")` returns `::1` first,
+    # and `[::1]:P` is an independently bindable socket while `127.0.0.1:P` is
+    # held — a second process can own it at the same moment we own the v4 one.
+    # Advertising the name therefore points the browser at IPv6 first, where we
+    # are not listening, and it only works by fallback; a local process squatting
+    # `[::1]:P` receives the authorization code instead.
+    #
+    # PKCE is what keeps that from being account theft — the code is bound to a
+    # verifier it never sees, and expires in about a minute — so the exposure is
+    # a failed enrollment rather than a stolen account. That is not a reason to
+    # leave it. `[::1]` also cannot be registered as a redirect URI, which is why
+    # Microsoft's loopback guidance says to prefer the literal address.
+    redirect_uri = f"http://127.0.0.1:{port}"
 
     authorize = f"https://{AUTHORITY_HOST}/{args.tenant}/oauth2/v2.0/authorize?" + (
         urllib.parse.urlencode(
