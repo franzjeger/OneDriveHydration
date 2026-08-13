@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: franzjeger/HydrationAPI
-          ref: f5fe66a4edaeffab686b6bb9aca885fba43b16c2
+          ref: b97fceb927bd614529e10245444a419151dfd5af
           path: .upstream/hydration-api
       - uses: dtolnay/rust-toolchain@1.85
       - name: Install Secret Service build dependency
