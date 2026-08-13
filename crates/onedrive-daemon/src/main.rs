@@ -200,7 +200,12 @@ fn main() -> io::Result<()> {
                 Config {
                     mount,
                     socket: args.socket,
-                    debounce: Duration::from_secs(900),
+                    // The framework's constant, not a number of our own. A
+                    // quarter of an hour was what this said before, with no
+                    // reasoning anywhere, and it meant a file created in the
+                    // sync folder did not reach the cloud until long after its
+                    // owner had concluded the client was broken.
+                    debounce: hydration_client::upload::QUIET_PERIOD,
                 },
                 access,
             )
