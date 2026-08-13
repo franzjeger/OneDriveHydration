@@ -31,7 +31,6 @@ import http.server
 import json
 import os
 import secrets
-import socket
 import subprocess
 import sys
 import urllib.error
@@ -80,12 +79,6 @@ class Redirect(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, *_args):
         """Silence the default stderr access log; it would print the code."""
-
-
-def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 def post_form(url: str, fields: dict) -> dict:
@@ -150,7 +143,16 @@ def main() -> None:
     challenge = b64url(hashlib.sha256(verifier.encode("ascii")).digest())
     state = secrets.token_urlsafe(16)
 
-    port = free_port()
+    # Bound once, on port 0, and the same socket serves the redirect. The
+    # earlier shape — pick a free port, close it, re-bind it inside HTTPServer
+    # later — left a window in which another local socket could take the port
+    # (measured; see docs/PKCE-ENROLLMENT-REVIEW.md §1c). A live listener
+    # cannot be displaced, so the consequence was our own bind failing, a
+    # crash rather than a theft — but a window that can simply not exist
+    # should not. Binding before the browser opens also means the listener is
+    # up before anything can be redirected at it.
+    server = http.server.HTTPServer(("127.0.0.1", 0), Redirect)
+    port = server.server_port
     # `127.0.0.1` literally, never the name `localhost`.
     #
     # Measured on this machine: `getaddrinfo("localhost")` returns `::1` first,
@@ -208,14 +210,24 @@ def main() -> None:
     print()
     print(f"Venter på redirect på {redirect_uri} ...")
 
-    server = http.server.HTTPServer(("127.0.0.1", port), Redirect)
     server.timeout = 300
     server.handle_request()
     server.server_close()
 
     got = Redirect.captured
     if got is None:
-        fail("ingen redirect kom inn innen 300 sekunder")
+        # Say why, not just that time ran out. The known way to land here
+        # after a *completed* sign-in is a sandboxed default browser (Flatpak,
+        # Snap) that is not allowed to reach a listener on the host's
+        # loopback — the review's §6.2 names it the nearest real risk.
+        fail(
+            "ingen redirect kom inn innen 300 sekunder. Hvis innloggingen "
+            "faktisk ble fullført i nettleseren, er den sannsynlige årsaken "
+            "en sandboxet nettleser (Flatpak/Snap) som ikke får koble til "
+            f"{redirect_uri} på verts-loopbacken; prøv igjen med en "
+            "usandboxet nettleser, eller bruk --no-browser og åpne URL-en "
+            "i en nettleser som når verten"
+        )
 
     if "error" in got:
         description = got.get("error_description", ["(ingen beskrivelse)"])[0]
