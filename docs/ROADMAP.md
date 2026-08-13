@@ -11,7 +11,9 @@
 ## M1: enroll and identify the account
 
 - [x] Device-code enrollment using the shared TokenCache
-- [ ] PKCE/browser enrollment threat-model review
+- [x] PKCE/browser enrollment threat-model review — accepted by the owner
+      2026-08-13; see `docs/PKCE-ENROLLMENT-REVIEW.md` for the conditions
+      that bind the implementation
 - [x] Resolve `/me/drive` instead of requiring `--drive-id`
 - [x] Store credentials through Secret Service/keyring
 - [ ] Live Graph smoke test using a dedicated non-production tenant
@@ -35,9 +37,11 @@
 - [x] Flyout: system-tray plasmoid with eviction, signal-driven
 - [x] Credential state on the D-Bus surface (property + change signal), shown by
       tray and flyout, with adopt-on-restart of a fresh `pkce-enroll.py` sign-in
-- [ ] In-product (re-)enrollment — blocked on M1's PKCE threat-model review; until
-      then the surfaces name `tools/pkce-enroll.py` and deliberately offer no
-      sign-in button
+- [ ] In-product (re-)enrollment — unblocked by M1's accepted PKCE review and
+      to be built under its §7 conditions (a `Grant` beside device code, straight
+      into the shared `TokenCache`, no plaintext file); until it lands the
+      surfaces name `tools/pkce-enroll.py` and deliberately offer no sign-in
+      button
 - [x] Dolphin action: "Free Up Space" as a KIO servicemenu, shipped as data with
       no new dependency; the entry's matching was measured with
       `probes/servicemenu-match.cpp` rather than taken from documentation

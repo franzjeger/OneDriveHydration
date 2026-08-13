@@ -1,12 +1,13 @@
 # Browser (authorization-code + PKCE) enrollment: threat-model review
 
-> **STATUS: DRAFT for the repository owner to accept or reject.**
-> This is the review that `docs/ROADMAP.md` M1 lists as unchecked
+> **STATUS: ACCEPTED by the repository owner, 2026-08-13.**
+> This is the review that `docs/ROADMAP.md` M1 listed as unchecked
 > ("PKCE/browser enrollment threat-model review"). It is a security decision
-> about whether authorization-code/PKCE enrollment belongs *in the product*.
-> It is not an agent's to ratify: nothing here has been merged, no `Grant`
-> variant has been added, and the roadmap box is left unticked on purpose. The
-> recommendation at the end is a proposal, not a resolution.
+> about whether authorization-code/PKCE enrollment belongs *in the product*,
+> and it was not an agent's to ratify: the recommendation in §7 was put to the
+> owner as a question and accepted as written, without amendments. The
+> conditions in §7 bind the implementation, and §6 lists what would re-open
+> this document.
 
 ## Why this is on the critical path, and why now
 
@@ -380,7 +381,7 @@ document:
 
 ---
 
-## 7. Recommendation (DRAFT — owner decides)
+## 7. Recommendation (accepted 2026-08-13)
 
 **Build it in the product, under the conditions below — do not bless the external
 script as the permanent answer, and do not remove device code.**
@@ -438,9 +439,10 @@ Rejected alternatives, recorded:
 
 ---
 
-*Do not tick `docs/ROADMAP.md` M1's "PKCE/browser enrollment threat-model
-review" on the basis of this draft. The box is the owner's to tick once this
-decision is accepted or amended.*
+*`docs/ROADMAP.md` M1's "PKCE/browser enrollment threat-model review" is
+ticked on the basis of the owner's acceptance above — the decision, not the
+draft's existence. The implementation the decision permits is tracked by the
+still-unticked M3 item, and lands only under §7's conditions.*
 
 <!-- References (Microsoft Learn, retrieved 2026-08-12):
 [reply-url]: https://learn.microsoft.com/en-us/entra/identity-platform/reply-url
