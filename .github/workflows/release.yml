@@ -10,7 +10,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  HYDRATION_API_REV: d7f8624f7d57aec4abb752267c0abff9abf59545
+  HYDRATION_API_REV: e42e3ca82fb2b3dcbee08985765ccb42739f51b7
 
 jobs:
   linux-tarball:

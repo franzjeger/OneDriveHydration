@@ -16,12 +16,15 @@ automatic primary-drive discovery, reviewed GraphAccess wiring, constant-memory 
 downloads and fail-closed QuickXorHash verification, a D-Bus state service and tray, a
 validated systemd installer that refuses deployments which would fail open
 (see [packaging/systemd](packaging/systemd/README.md)), and a Plasma flyout plasmoid with
-eviction. The daemon now says whether it is signed in — a credential state on its own
+eviction. The daemon says whether it is signed in — a credential state on its own
 socket and on the D-Bus surface, shown by the tray and flyout with the enrollment
-instruction that works here — but in-product (re-)enrollment still waits on the PKCE
-threat-model review. Dolphin has the action half of its integration ("Free Up Space",
-shipped as data); the status overlays are not built, because they are the one surface
-with no data-only path. It is not ready for user data.
+instruction that works here — and, with the PKCE threat-model review accepted
+(2026-08-13), it can now enroll itself: `auth --browser` runs the authorization-code +
+PKCE flow in-product, straight into Secret Service with no plaintext moment, and
+restarts a running daemon onto the new sign-in. Dolphin has the action half of its
+integration ("Free Up Space", shipped as data); the status overlays are not built,
+because they are the one surface with no data-only path. It is not ready for user
+data.
 
 ## Design rules
 
@@ -45,6 +48,17 @@ Licensed under either [Apache License, Version 2.0](LICENSE-APACHE) or
 Enroll once; the refresh token is stored in the desktop's Linux Secret Service collection.
 The command fails closed when no Secret Service provider is available or the collection cannot
 be unlocked; it never falls back to a plaintext token file.
+
+On a tenant whose Conditional Access blocks the device code flow — this deployment's does —
+pass `--browser`: the daemon runs the authorization-code + PKCE flow itself, on a loopback
+listener bound once at `127.0.0.1`, and installs the result directly into Secret Service
+(the accepted `docs/PKCE-ENROLLMENT-REVIEW.md` is the design record). `--no-open` prints
+the sign-in URL instead of launching `xdg-open`. `--browser` deliberately skips the
+"already signed in" short-circuit, because it is also the re-enrollment path — and after
+storing the credential it `try-restart`s `onedrive-hydration.service`, so a daemon running
+signed-out picks the new sign-in up without manual intervention. `tools/pkce-enroll.py`
+remains as the out-of-product fallback; its file hand-off and the adopt-on-restart
+migration still work exactly as described below.
 
 At every start, a `refresh-token` file in the state directory — the file-backed alpha's, or
 one freshly written by `tools/pkce-enroll.py` — is adopted: written into Secret Service,
@@ -129,9 +143,10 @@ the panel draws everything. Five states are shown, in order of precedence: daemo
 service) not running, another mount exposing the sync files (`Exposures > 0`, rendered as
 `NeedsAttention` because reads through such a mount bypass hydration), sign-in required
 (`CredentialState` `rejected`, also `NeedsAttention`: nothing is lost, and the tooltip
-names `tools/pkce-enroll.py` because Conditional Access blocks the daemon's device-code
-flow on this deployment — deliberately a sentence and not a button, since the tray cannot
-run a browser flow), changes waiting to upload, and up to date. An `unsaved` credential is
+names `onedrive-hydration-daemon auth --browser` because Conditional Access blocks the
+device-code flow on this deployment — deliberately a sentence and not a button, since the
+tray cannot run a browser flow in its own process), changes waiting to upload, and up to
+date. An `unsaved` credential is
 a warning sentence appended to whichever of the running states is shown, not a state of
 its own: syncing still works, and the sentence says what breaks (the next restart) and
 what to do (unlock the keyring). Icons resolve by name from the hicolor theme; run

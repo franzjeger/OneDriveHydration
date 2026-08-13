@@ -150,12 +150,13 @@ fn store_caveat(credential: CredentialState) -> &'static str {
 /// Wording rule for the stopped states: the files are *unreachable*, not
 /// lost, and the text says so explicitly rather than leaving a scary blank.
 /// The signed-out state follows the same rule — a signed-out client has
-/// lost nothing either — and names the tool that actually works on this
-/// deployment (`tools/pkce-enroll.py`; Conditional Access blocks the
-/// daemon's own device-code flow). There is deliberately no sign-in button
-/// anywhere: the surface cannot run a browser flow, and a button that
-/// cannot do the thing it names is worse than a sentence that can be
-/// followed.
+/// lost nothing either — and names the sign-in that actually works on this
+/// deployment (`onedrive-hydration-daemon auth --browser`, the in-product
+/// browser flow the accepted PKCE review permitted; Conditional Access
+/// blocks the device-code flow). There is deliberately no sign-in button
+/// anywhere: the surface cannot run a browser flow in its own process, and
+/// a button that cannot do the thing it names is worse than a sentence
+/// that can be followed.
 pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Presentation {
     let Some(state) = state else {
         return Presentation {
@@ -221,9 +222,10 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
                           revoked, expired, or invalidated by a password change or policy. \
                           Nothing is lost: every synced file is still in OneDrive, but nothing \
                           syncs and cloud-only files cannot be opened until you sign in again. \
-                          Sign in from a terminal with tools/pkce-enroll.py (Conditional Access \
-                          blocks the built-in device-code sign-in here); the daemon adopts it \
-                          and restarts by itself."
+                          Sign in from a terminal with onedrive-hydration-daemon auth \
+                          --browser (Conditional Access blocks the device-code sign-in here); \
+                          it signs you in through your browser and restarts the daemon by \
+                          itself."
             .to_owned();
         if state.unsent > 0 {
             detail.push_str(&format!(
@@ -1178,12 +1180,16 @@ mod tests {
         assert!(p.detail.contains("Nothing is lost"), "{}", p.detail);
         // The instruction must be one that works on this deployment —
         // Conditional Access blocks the daemon's device-code flow, so the
-        // browser enrollment tool is named, and the wording says why.
-        assert!(p.detail.contains("tools/pkce-enroll.py"), "{}", p.detail);
+        // in-product browser sign-in is named, and the wording says why.
+        assert!(p.detail.contains("auth --browser"), "{}", p.detail);
         assert!(p.detail.contains("Conditional Access"), "{}", p.detail);
-        // And what happens next, because the daemon really does restart
-        // itself once the enrollment file appears.
-        assert!(p.detail.contains("restarts by itself"), "{}", p.detail);
+        // And what happens next, because the auth command really does
+        // try-restart the running daemon once the credential is stored.
+        assert!(
+            p.detail.contains("restarts the daemon by itself"),
+            "{}",
+            p.detail
+        );
 
         // Unsent work is still reported, the way the exposure arm does it.
         let busy = present(Some(state(true, 4, 0, 0)), CredentialState::Rejected);
@@ -1213,7 +1219,7 @@ mod tests {
         // wrong message this surface exists to avoid.
         let p = present(Some(state(false, 0, 0, 0)), CredentialState::Rejected);
         assert_eq!(p.headline, "Sync daemon not running");
-        assert!(!p.detail.contains("pkce-enroll"), "{}", p.detail);
+        assert!(!p.detail.contains("auth --browser"), "{}", p.detail);
         let gone = present(None, CredentialState::Rejected);
         assert_eq!(gone.headline, "State service not running");
     }

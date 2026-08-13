@@ -190,8 +190,8 @@ fn status_line(health: CredentialHealth) -> String {
             health.store_error.unwrap_or(io::ErrorKind::Other)
         ),
         CredentialState::Rejected => "sign-in: REQUIRED — OneDrive no longer accepts this \
-             machine's saved sign-in. Sign in again from a terminal with tools/pkce-enroll.py; \
-             the daemon adopts the new sign-in and restarts itself."
+             machine's saved sign-in. Sign in again with onedrive-hydration-daemon auth \
+             --browser; it stores the new sign-in and restarts a running daemon itself."
             .to_owned(),
     }
 }
@@ -460,7 +460,7 @@ mod tests {
             store_error: None,
         });
         assert!(healthy.contains("healthy"), "{healthy}");
-        assert!(!healthy.contains("pkce-enroll"), "{healthy}");
+        assert!(!healthy.contains("auth --browser"), "{healthy}");
 
         let unsaved = status_line(CredentialHealth {
             signed_in: true,
@@ -473,7 +473,10 @@ mod tests {
             signed_in: false,
             store_error: None,
         });
-        assert!(rejected.contains("tools/pkce-enroll.py"), "{rejected}");
-        assert!(rejected.contains("restarts itself"), "{rejected}");
+        assert!(rejected.contains("auth --browser"), "{rejected}");
+        assert!(
+            rejected.contains("restarts a running daemon itself"),
+            "{rejected}"
+        );
     }
 }

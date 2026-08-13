@@ -215,7 +215,7 @@ PlasmoidItem {
             };
         }
         if (root.credentialState === "rejected") {
-            let detail = "OneDrive no longer accepts this machine's saved sign-in — it was revoked, expired, or invalidated by a password change or policy. Nothing is lost: every synced file is still in OneDrive, but nothing syncs and cloud-only files cannot be opened until you sign in again. Sign in from a terminal with tools/pkce-enroll.py (Conditional Access blocks the built-in device-code sign-in here); the daemon adopts it and restarts by itself.";
+            let detail = "OneDrive no longer accepts this machine's saved sign-in — it was revoked, expired, or invalidated by a password change or policy. Nothing is lost: every synced file is still in OneDrive, but nothing syncs and cloud-only files cannot be opened until you sign in again. Sign in from a terminal with onedrive-hydration-daemon auth --browser (Conditional Access blocks the device-code sign-in here); it signs you in through your browser and restarts the daemon by itself.";
             if (root.unsent > 0) {
                 detail += " " + root.count(root.unsent, "change is", "changes are") + " still waiting to upload.";
             }

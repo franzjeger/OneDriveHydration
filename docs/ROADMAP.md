@@ -37,11 +37,17 @@
 - [x] Flyout: system-tray plasmoid with eviction, signal-driven
 - [x] Credential state on the D-Bus surface (property + change signal), shown by
       tray and flyout, with adopt-on-restart of a fresh `pkce-enroll.py` sign-in
-- [ ] In-product (re-)enrollment — unblocked by M1's accepted PKCE review and
-      to be built under its §7 conditions (a `Grant` beside device code, straight
-      into the shared `TokenCache`, no plaintext file); until it lands the
-      surfaces name `tools/pkce-enroll.py` and deliberately offer no sign-in
-      button
+- [x] In-product (re-)enrollment — built under the accepted review's §7
+      conditions: an `AuthCode` grant beside device code in `hydration-graph`,
+      installing straight into the shared `TokenCache` with no plaintext file,
+      a loopback listener bound once at literal `127.0.0.1`, surfaced as
+      `auth --browser` (which also `try-restart`s a running daemon onto the
+      new sign-in). The surfaces name that command; there is still
+      deliberately no sign-in button, and `tools/pkce-enroll.py` remains as
+      the out-of-product fallback. Outstanding from §7: the flow has not yet
+      been tested against a sandboxed (Flatpak/Snap) default browser — the
+      timeout diagnoses that case by name, but the measurement itself needs a
+      desktop with one installed
 - [x] Dolphin action: "Free Up Space" as a KIO servicemenu, shipped as data with
       no new dependency; the entry's matching was measured with
       `probes/servicemenu-match.cpp` rather than taken from documentation

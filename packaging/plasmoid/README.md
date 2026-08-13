@@ -111,13 +111,15 @@ Built deliberately against what exists rather than inventing data:
   activity, no conflict list.
 * Credential health is now on the surface (`CredentialState`, with
   `CredentialStateChanged`) and shown — "Sign-in required" names
-  `tools/pkce-enroll.py`, the enrollment that works on this deployment,
-  because Conditional Access blocks the daemon's device-code flow. What the
-  flyout still cannot do is *start* enrollment: an in-product sign-in flow
-  waits on the PKCE threat-model review (docs/ROADMAP.md M1), and the flyout
-  does not even know the daemon's client id. There is deliberately no
-  sign-in button — a button that cannot do the thing it names is worse than
-  a sentence that can be followed.
+  `onedrive-hydration-daemon auth --browser`, the in-product browser
+  enrollment the accepted PKCE review permitted, because Conditional Access
+  blocks the device-code flow on this deployment. What the flyout still
+  cannot do is *start* that enrollment itself: the accepted review keeps the
+  act of enrolling a user-launched, session-scoped process (§3 — the flyout
+  may prompt, but the browser launch and credential write do not belong on a
+  bus method), and the flyout does not even know the daemon's client id.
+  There is deliberately no sign-in button — a button that cannot do the
+  thing it names is worse than a sentence that can be followed.
 
 Widening the surface is its own task with its own measurements; this flyout
 shows everything the surface can currently say and nothing it cannot.

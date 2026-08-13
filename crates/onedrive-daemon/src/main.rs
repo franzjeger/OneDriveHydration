@@ -1,5 +1,6 @@
 use hydration_client::daemon_loop::{self, Config};
-use hydration_graph::{DriveScope, GraphAccess, GraphHttp, TagSource};
+use hydration_graph::browser::Loopback;
+use hydration_graph::{DriveScope, GraphAccess, GraphHttp, SharedTokenCache, TagSource};
 use onedrive_hydration_daemon::auth_state::{self, CredentialHealth, PublisherOptions};
 use onedrive_hydration_daemon::{
     auth_config, discover_drive, runtime_socket, token_cache, wait_for_secret_service,
@@ -11,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 enum Command {
-    Auth,
+    Auth { browser: bool, no_open: bool },
     Run { mount: PathBuf },
 }
 
@@ -39,18 +40,29 @@ fn required(name: &str) -> String {
     })
 }
 
+fn flag(name: &str) -> bool {
+    std::env::args().skip(1).any(|arg| arg == name)
+}
+
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  onedrive-hydration-daemon auth --state-dir <path> --client-id <uuid>\n  \
+        "usage:\n  onedrive-hydration-daemon auth --state-dir <path> --client-id <uuid> \
+         [--browser [--no-open]]\n  \
          onedrive-hydration-daemon run --mount <path> --state-dir <path> --client-id <uuid> \
-         [--socket <path>]"
+         [--socket <path>]\n\n\
+         --browser signs in through the system browser (authorization code + PKCE) \
+         instead of the device code flow, which Conditional Access policies commonly \
+         block; --no-open prints the sign-in URL instead of launching the browser"
     );
     std::process::exit(2)
 }
 
 fn parse() -> Args {
     let command = match std::env::args().nth(1).as_deref() {
-        Some("auth") => Command::Auth,
+        Some("auth") => Command::Auth {
+            browser: flag("--browser"),
+            no_open: flag("--no-open"),
+        },
         Some("run") => Command::Run {
             mount: PathBuf::from(required("--mount")),
         },
@@ -77,6 +89,79 @@ fn auth_error(action: &'static str) -> impl FnOnce(hydration_graph::auth::AuthEr
     move |_| io::Error::new(io::ErrorKind::PermissionDenied, action)
 }
 
+/// How long the browser sign-in waits for the redirect. The same bound the
+/// enrollment script used; the human is the slow half, and five minutes is
+/// several sign-ins' worth of typing a password and approving an MFA prompt.
+const BROWSER_SIGN_IN_WAIT: Duration = Duration::from_secs(300);
+
+/// The browser (authorization code + PKCE) sign-in, per the accepted
+/// `docs/PKCE-ENROLLMENT-REVIEW.md`: a user-initiated, session-scoped act.
+///
+/// No `resume()` short-circuit on purpose, unlike the device code arm. This
+/// command is also the re-enrollment path — the stored credential being
+/// present says nothing about it working, and the one situation in which a
+/// user runs it twice is a credential the service has rejected. The fresh
+/// sign-in replaces the stored one; `prompt=select_account` (sent by
+/// `begin_browser_code`) is what keeps a live SSO session from silently
+/// re-enrolling the account that just failed.
+fn browser_auth(cache: &SharedTokenCache, no_open: bool) -> io::Result<()> {
+    // Bound before the URL exists, so the port in the URL is owned from the
+    // moment anything could be redirected at it.
+    let listener = Loopback::bind()?;
+    let flow = cache
+        .begin_browser_code(&listener.redirect_uri())
+        .map_err(auth_error("browser enrollment could not be prepared"))?;
+
+    // Printed before any launch attempt: whatever xdg-open does, the user can
+    // always finish by hand from a browser that can reach this machine.
+    println!("Sign in at:\n{}", flow.authorize_url());
+    if no_open {
+        println!("(--no-open: open the URL yourself)");
+    } else {
+        // Surfaced, never discarded: a silent xdg-open failure reads as a
+        // hang, and the recovery — the printed URL — is already on screen.
+        let opened = std::process::Command::new("xdg-open")
+            .arg(flow.authorize_url())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match opened {
+            Ok(status) if status.success() => println!("Opening the browser…"),
+            Ok(status) => println!("xdg-open failed ({status}); use the URL above"),
+            Err(e) => println!("could not run xdg-open ({e}); use the URL above"),
+        }
+    }
+    println!("Waiting for the sign-in to finish…");
+
+    let code = listener.wait(flow.state(), BROWSER_SIGN_IN_WAIT)?;
+    cache
+        .complete_browser_code(&flow, &code)
+        .map_err(auth_error("browser enrollment did not complete"))?;
+    println!("Sign-in completed and the rotated credential was stored.");
+
+    // A daemon already running signed-out will not notice on its own. The
+    // legacy-file path restarts itself — the daemon watches the state
+    // directory for the enrollment file — but this flow writes straight into
+    // Secret Service on purpose (no plaintext moment), and nothing watches
+    // that. This process *is* the user's session, so it may do the restart
+    // the file watcher used to: try-restart is a no-op when the unit is not
+    // running, and the outcome is printed either way rather than assumed.
+    let restarted = std::process::Command::new("systemctl")
+        .args(["--user", "try-restart", "onedrive-hydration.service"])
+        .status();
+    match restarted {
+        Ok(status) if status.success() => {
+            println!("A running daemon (if any) was restarted onto the new sign-in.")
+        }
+        _ => println!(
+            "If the daemon is running signed-out, restart it to pick up the new \
+             sign-in: systemctl --user try-restart onedrive-hydration.service \
+             (development invocations: stop and start the run command yourself)"
+        ),
+    }
+    Ok(())
+}
+
 fn main() -> io::Result<()> {
     let args = parse();
     if let Command::Run { .. } = &args.command {
@@ -91,7 +176,10 @@ fn main() -> io::Result<()> {
     }
     let cache = token_cache(auth_config(args.client_id), &args.state_dir)?;
     match args.command {
-        Command::Auth => {
+        Command::Auth { browser, no_open } => {
+            if browser {
+                return browser_auth(&cache, no_open);
+            }
             if cache.resume()? {
                 println!("Already signed in.");
                 return Ok(());

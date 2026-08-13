@@ -207,7 +207,7 @@ fn status_answers_in_prose_on_the_same_connection_repeatedly() {
     stream.write_all(b"status\n").unwrap();
     let answer = read_line(&mut reader);
     assert!(answer.contains("sign-in: REQUIRED"), "{answer}");
-    assert!(answer.contains("tools/pkce-enroll.py"), "{answer}");
+    assert!(answer.contains("auth --browser"), "{answer}");
 
     // Unknown verbs answer, not hang — same discipline as the control
     // socket.
