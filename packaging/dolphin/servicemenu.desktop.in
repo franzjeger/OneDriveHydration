@@ -1,0 +1,31 @@
+[Desktop Entry]
+Type=Service
+# Measured on this KIO build with probes/servicemenu-match.cpp, not taken from
+# documentation — nothing installed on the machine used all/allfiles, so it was
+# an assumption until the probe ran. Against a control that returned no actions
+# at all, an all/allfiles entry:
+#   * appears for a regular file of any mimetype (measured on text/plain),
+#   * does NOT appear for a directory — which is what is wanted, because the
+#     daemon's evict verb takes a file and there is no bulk-evict to offer,
+#   * survives a multi-file selection, so Exec=... %F below is honest,
+#   * disappears entirely for a mixed file+directory selection, so a mixed
+#     selection silently offers nothing rather than the wrong thing.
+MimeType=all/allfiles;
+Actions=onedriveHydrationFreeUpSpace;
+
+[Desktop Action onedriveHydrationFreeUpSpace]
+# No ellipsis, deliberately, and this is the one place the wording differs from
+# the flyout's "Free Up Space…". There the ellipsis is honest because a file
+# picker opens first; here Dolphin has already chosen the files and the action
+# runs immediately.
+Name=Free Up Space
+# The application icon, which packaging/icons/install-icons.sh installs. Using
+# a stock KDE icon would be cheaper but would not say whose action this is, and
+# inventing a new asset would need the provenance note that packaging/icons/
+# requires of every ported image.
+Icon=onedrive-hydration
+# %F is every selected file as an absolute local path. The wrapper makes each
+# one relative to the sync root, because that is what the control socket's
+# evict verb takes — and it is the wrapper, not this file, that knows where the
+# sync root is: KIO has no way to restrict an entry by path.
+Exec=@ACTION@ %F

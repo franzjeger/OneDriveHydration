@@ -38,4 +38,13 @@
 - [ ] In-product (re-)enrollment — blocked on M1's PKCE threat-model review; until
       then the surfaces name `tools/pkce-enroll.py` and deliberately offer no
       sign-in button
-- [ ] Dolphin actions and status overlays
+- [x] Dolphin action: "Free Up Space" as a KIO servicemenu, shipped as data with
+      no new dependency; the entry's matching was measured with
+      `probes/servicemenu-match.cpp` rather than taken from documentation
+- [ ] Dolphin status overlays — no data-only path exists: `KOverlayIconPlugin`
+      and `KVersionControlPlugin` are both compiled C++, so this is a dependency
+      decision (CMake, Qt6 and KF6 in a Cargo workspace, and a `.so` installed as
+      root) and not more of the same work. The per-file xattrs it would read are
+      already on disk; `docs/DOLPHIN-GROUNDWORK.md` has the measurements, the
+      `st_blocks` trap it must avoid, and the stale donor plugin it would collide
+      with

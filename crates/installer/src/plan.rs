@@ -833,11 +833,15 @@ pub fn install(
              flyout); a session bus that predates this install may need one \
              log-out/log-in to notice the new activation file\n\
              {tray_next}\n\
+             for Dolphin's \"Free Up Space\" action, as {u}: \
+             packaging/dolphin/install-servicemenu.sh --mount {m} (data only, no \
+             overlays — see docs/DOLPHIN-GROUNDWORK.md)\n\
              not enrolled yet? as {u}: onedrive-hydration-daemon auth --state-dir \
              ~/.local/state/onedrive-hydration --client-id <the id you passed>\n\
              this tool did NOT create the subvolume, did NOT edit fstab beyond what \
-             was shown, did NOT install the Plasma applet, and did NOT touch \
-             credentials — those stay yours",
+             was shown, did NOT install the Plasma applet or the Dolphin action, \
+             and did NOT touch credentials — those stay yours",
+            m = facts.mount.display(),
             u = facts.user
         ),
     });

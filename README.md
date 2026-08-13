@@ -19,8 +19,9 @@ validated systemd installer that refuses deployments which would fail open
 eviction. The daemon now says whether it is signed in — a credential state on its own
 socket and on the D-Bus surface, shown by the tray and flyout with the enrollment
 instruction that works here — but in-product (re-)enrollment still waits on the PKCE
-threat-model review, and Dolphin integration is not yet built. It is not ready for user
-data.
+threat-model review. Dolphin has the action half of its integration ("Free Up Space",
+shipped as data); the status overlays are not built, because they are the one surface
+with no data-only path. It is not ready for user data.
 
 ## Design rules
 
@@ -157,3 +158,14 @@ to the binary, unless the applet is already installed for that user, which is re
 one of the three is named. What the flyout does not show is what
 the D-Bus surface cannot yet say — account, quota, per-file transfers, byte totals,
 credential health — and `packaging/plasmoid/README.md` keeps that list honestly.
+
+Dolphin gets the same trade a third time: "Free Up Space" on a selected file is a KIO
+servicemenu — a `.desktop` file and a shell wrapper, no toolkit — installed per user with
+`packaging/dolphin/install-servicemenu.sh`. That KIO cannot filter a menu entry by path
+was measured, not assumed, so the entry exists on every file and the wrapper refuses,
+naming the sync root, for anything outside it; and because `onedrive-hydrationctl` exits
+zero when the daemon *declines* an eviction, the wrapper reads the reply rather than the
+exit status, with a test deriving those reply prefixes from the Rust parser. The status
+overlays are the exception to the whole pattern: `KOverlayIconPlugin` is compiled C++ with
+no data-only equivalent, so it is a dependency decision rather than more of the same, and
+`docs/DOLPHIN-GROUNDWORK.md` sets out what it would cost and what it must not get wrong.

@@ -48,10 +48,10 @@ and a destructive operation); it does not touch `/etc/fstab` without
 `--consent-fstab`, and there is no code path that composes an entry without
 `noauto`; it does not enroll credentials or invent a client id — `--client-id`
 is required, and it is public configuration, never a secret; and it does not
-install or remove the Plasma applet, which is a per-user operation on the
-user's own session data — `packaging/plasmoid/install-plasmoid.sh` is printed
-instead, and `uninstall` names the `kpackagetool6 --remove` line rather than
-running it.
+install or remove the Plasma applet or the Dolphin action, which are per-user
+operations on the user's own session data — `packaging/plasmoid/install-plasmoid.sh`
+and `packaging/dolphin/install-servicemenu.sh` are printed instead, and
+`uninstall` names the `kpackagetool6 --remove` line rather than running it.
 
 `--prefix <dir>` rehearses an install or uninstall against a scratch root:
 files land under the prefix, no command is ever executed. `render` prints the
