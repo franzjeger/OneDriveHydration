@@ -130,11 +130,33 @@ fn main() -> io::Result<()> {
             // provider roles: the same shared cache all three roles refresh
             // through is the one whose conclusions get published.
             let observed = Arc::clone(&cache);
+            // cTag, and the choice is not free — it is the lesser of two costs.
+            //
+            // A tag is used for three things: telling whether an object changed,
+            // verifying downloaded content, and guarding an update as an
+            // `if-match`. QuickXorHash is a hash of the object, so it does the
+            // first two and cannot do the third: Graph accepts no hash as a
+            // precondition, and `GraphSink::precondition` refuses rather than
+            // write blind. Measured on a live account on 2026-08-13, that meant
+            // *every* update to a file that already existed was refused. Six
+            // edits sat on the machine for hours. A sync client that cannot send
+            // a change to an existing document is not one.
+            //
+            // What it costs: `GraphProvider::fetch` verifies a `qx:` tag against
+            // the bytes it downloaded, and with cTags there is no hash to check,
+            // so that verification does not run. Corruption in transit is left to
+            // TLS and to the service, which is where every other client leaves
+            // it.
+            //
+            // Only consulted when nothing is pinned yet. Once a drive has a
+            // persisted tree, `GraphAccess` follows what that says — every tag
+            // already written is of that shape, and `delta::is_current` compares
+            // them byte for byte.
             let access = GraphAccess::with_token_cache(
                 DriveScope::primary(profile.id),
                 &mount,
                 &args.state_dir,
-                TagSource::QuickXor,
+                TagSource::CTag,
                 cache,
             );
 
