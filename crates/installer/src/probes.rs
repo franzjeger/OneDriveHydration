@@ -559,6 +559,76 @@ fn stable_device_name(source: &str) -> String {
     source.to_string()
 }
 
+/// The Plasma applet's package id: the name `kpackagetool6 --type Plasma/Applet`
+/// installs it under and the directory it creates. Identical to the D-Bus name
+/// by construction — `packaging/plasmoid/` holds the tree under exactly this
+/// name, and `crates/onedrive-daemon/tests/plasmoid_package.rs` pins it there.
+pub const PLASMOID_ID: &str = "io.github.franzjeger.OneDriveHydration";
+
+/// Whether the Plasma applet is installed for the user this deployment is for.
+///
+/// Deliberately a package on disk and *not* "is plasmashell running". A running
+/// shell is a property of the session that happens to exist while `sudo` is
+/// being typed; the applet package survives reboots and desktop switches, and
+/// it is what makes a second tray icon possible at all. See [`crate::units::Tray`]
+/// for why the distinction decides the whole design.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Plasmoid {
+    /// Installed, at the package directory that holds it.
+    Present {
+        path: PathBuf,
+    },
+    Absent,
+}
+
+/// Where a Plasma applet package lands, in search order: the user's own data
+/// directory first — `kpackagetool6` without `--global`, which is what
+/// `packaging/plasmoid/install-plasmoid.sh` runs — then the system-wide tree a
+/// distribution package would use.
+///
+/// Measured, not taken from documentation: with the applet installed for this
+/// user, `kpackagetool6 --type Plasma/Applet --show io.github.franzjeger.OneDriveHydration`
+/// reported `Path: /home/frank/.local/share/plasma/plasmoids/<id>/`, and
+/// `/usr/share/plasma/plasmoids` holds the shipped applets on the same machine.
+pub fn plasmoid_dirs(prefix: &Path, home: &Path) -> Vec<PathBuf> {
+    let rel = home.strip_prefix("/").unwrap_or(home);
+    vec![
+        prefix.join(rel).join(".local/share/plasma/plasmoids"),
+        prefix.join("usr/share/plasma/plasmoids"),
+    ]
+}
+
+/// Look for the applet under `prefix`. `metadata.json` is what is checked
+/// rather than the directory: `kpackagetool6` requires that file, an empty
+/// leftover directory is not an installed applet, and a tray icon that is not
+/// really there must not be able to cause a refusal.
+pub fn plasmoid_package(prefix: &Path, home: &Path) -> Plasmoid {
+    for dir in plasmoid_dirs(prefix, home) {
+        let pkg = dir.join(PLASMOID_ID);
+        if pkg.join("metadata.json").is_file() {
+            return Plasmoid::Present { path: pkg };
+        }
+    }
+    Plasmoid::Absent
+}
+
+/// The applet as an *observation*, with the rehearsal rule applied: look under
+/// the prefix, and when a rehearsal stages nothing there, fall back to the
+/// machine's real answer.
+///
+/// The same rule `observe` applies to fstab, for the same reason: `--prefix` is
+/// meant to rehearse *this* deployment, and the run an operator makes before
+/// the real one is exactly the run that has to be able to show them the
+/// collision. Split out from [`plasmoid_package`] so the fallback itself can be
+/// exercised — point `home` at a directory a test controls and the `/` search
+/// lands inside it.
+pub fn plasmoid_observed(prefix: &Path, home: &Path) -> Plasmoid {
+    match plasmoid_package(prefix, home) {
+        Plasmoid::Absent if prefix != Path::new("/") => plasmoid_package(Path::new("/"), home),
+        found => found,
+    }
+}
+
 /// A binary the units point at, and whether it can actually be executed.
 pub fn binary_state(dir: &Path, name: &str) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;

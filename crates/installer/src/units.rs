@@ -53,6 +53,68 @@ pub const DOCUMENTED_NAMESPACE_DIRECTIVES: [&str; 20] = [
     "RootImage",
 ];
 
+/// The user unit that runs the StatusNotifierItem binary. Named here because
+/// three places need it — rendering it, retiring one an earlier install left,
+/// and removing it on uninstall — and a literal repeated three times is a
+/// literal that will eventually be changed twice.
+pub const TRAY_UNIT: &str = "onedrive-hydration-tray.service";
+
+/// Which surface draws this deployment's tray icon.
+///
+/// There is deliberately no `Auto`, because the desktop is not a fact at
+/// install time. The tray unit is `WantedBy=graphical-session.target` and
+/// starts at *session* start; the installer runs as root, usually from a shell
+/// with no graphical session at all; and a machine installed under Plasma can
+/// be logged into under sway tomorrow. Branching on a running `plasmashell`
+/// would make the installed set depend on what happened to be running the
+/// moment `sudo` was typed — a deployment whose facts came from somewhere
+/// other than the deployment, which is the shape of wrongness this whole
+/// installer exists to refuse.
+///
+/// What *is* durable is whether the applet package is on disk, and that is
+/// what [`crate::probes::plasmoid_package`] measures. It does not answer which
+/// surface the operator wants; it only detects that both are present, which is
+/// a question rather than an answer — hence the refusal in
+/// [`crate::plan::install`] and this flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tray {
+    /// [`TRAY_UNIT`], running the StatusNotifierItem binary. Draws on any
+    /// desktop with a `StatusNotifierWatcher` — GNOME with an extension, XFCE,
+    /// sway with waybar — and on Plasma as well, which is exactly the
+    /// collision.
+    Sni,
+    /// The Plasma applet, which is a system-tray entry in its own right and
+    /// carries the flyout the binary cannot draw. Installed per user by
+    /// `packaging/plasmoid/install-plasmoid.sh` and never by this tool, for the
+    /// same reason the subvolume and the enrollment are not this tool's: it is
+    /// a per-user operation on the user's own session data, and this installer
+    /// prints such commands instead of running them.
+    Plasmoid,
+    /// No tray at all. `onedrive-hydrationctl status` is then the only surface,
+    /// which is the honest answer for a headless deployment.
+    None,
+}
+
+impl Tray {
+    /// The spelling `--tray` accepts, and the one printed back.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tray::Sni => "sni",
+            Tray::Plasmoid => "plasmoid",
+            Tray::None => "none",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Tray> {
+        match s {
+            "sni" => Some(Tray::Sni),
+            "plasmoid" => Some(Tray::Plasmoid),
+            "none" => Some(Tray::None),
+            _ => None,
+        }
+    }
+}
+
 /// One rendered unit file, by its final basename.
 #[derive(Debug, Clone)]
 pub struct UnitFile {
@@ -120,7 +182,13 @@ impl Rendered {
 /// correct if the home moves with the user, and it matches the hand-written
 /// reference. System units never use specifiers — `%t` means `/run` there,
 /// which is the kind of quiet wrongness concrete units exist to rule out.
-pub fn render(t: &Templates, f: &Facts) -> Rendered {
+///
+/// `tray` decides whether [`TRAY_UNIT`] is part of the set at all. It is a
+/// parameter rather than a filter applied afterwards so that every caller has
+/// to state the choice: `Rendered` is documented as everything the installer
+/// writes, and a second call site that quietly rendered the default would put
+/// back the second icon this argument exists to prevent.
+pub fn render(t: &Templates, f: &Facts, tray: Tray) -> Rendered {
     let mount = f.mount.to_string_lossy().into_owned();
     let socket = f.socket.to_string_lossy().into_owned();
     let home = f.home.to_string_lossy().into_owned();
@@ -150,6 +218,26 @@ pub fn render(t: &Templates, f: &Facts) -> Rendered {
             .replace("@BIN@", &bin)
     };
 
+    let mut user = vec![
+        UnitFile {
+            name: "onedrive-hydration.service".into(),
+            text: sub(&t.sync_service),
+        },
+        UnitFile {
+            name: "onedrive-hydration-dbus.service".into(),
+            text: sub(&t.dbus_service),
+        },
+    ];
+    // The state service is rendered whatever the tray surface is: the applet
+    // talks to exactly the same bus name, so it is the tray unit alone that
+    // this choice removes.
+    if tray == Tray::Sni {
+        user.push(UnitFile {
+            name: TRAY_UNIT.into(),
+            text: sub(&t.tray_service),
+        });
+    }
+
     Rendered {
         system: vec![
             UnitFile {
@@ -161,20 +249,7 @@ pub fn render(t: &Templates, f: &Facts) -> Rendered {
                 text: sub(&t.hydrationd_path),
             },
         ],
-        user: vec![
-            UnitFile {
-                name: "onedrive-hydration.service".into(),
-                text: sub(&t.sync_service),
-            },
-            UnitFile {
-                name: "onedrive-hydration-dbus.service".into(),
-                text: sub(&t.dbus_service),
-            },
-            UnitFile {
-                name: "onedrive-hydration-tray.service".into(),
-                text: sub(&t.tray_service),
-            },
-        ],
+        user,
         bus_services: vec![UnitFile {
             name: "io.github.franzjeger.OneDriveHydration.service".into(),
             text: sub(&t.dbus_activation),

@@ -149,6 +149,11 @@ a test pins the two surfaces together — and adds the two actions the tray coul
 opening the sync folder, and "Free Up Space…", which picks a file under the mount and calls
 `Evict`, quoting the daemon's refusal reason verbatim when it declines. On Plasma the
 plasmoid *is* the tray presence; running the SNI binary alongside it shows a second icon,
-so keep that one for desktops without plasmashell. What the flyout does not show is what
+so keep that one for desktops without plasmashell. Which of the two a deployment installs
+is told to the installer — `--tray sni|plasmoid|none` — and never detected: the applet
+draws only under plasmashell, the binary wherever there is a `StatusNotifierWatcher`, and
+which desktop the user logs into is not a fact at install time. Say nothing and it defaults
+to the binary, unless the applet is already installed for that user, which is refused until
+one of the three is named. What the flyout does not show is what
 the D-Bus surface cannot yet say — account, quota, per-file transfers, byte totals,
 credential health — and `packaging/plasmoid/README.md` keeps that list honestly.

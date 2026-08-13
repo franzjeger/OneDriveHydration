@@ -13,9 +13,9 @@ use onedrive_hydration_install::plan::{
     execute, install, uninstall, Action, ExecMode, Observed, Options, Outcome, Planned,
 };
 use onedrive_hydration_install::probes::{
-    self, secret_service_at, KernelSupport, SecretService, Vantage,
+    self, secret_service_at, KernelSupport, Plasmoid, SecretService, Vantage,
 };
-use onedrive_hydration_install::units::{self, Templates};
+use onedrive_hydration_install::units::{self, Templates, Tray};
 use onedrive_hydration_install::Facts;
 use std::path::{Path, PathBuf};
 
@@ -52,6 +52,11 @@ fn good_observed() -> Observed {
         mountinfo: GOOD_TABLE.into(),
         fstab: GOOD_FSTAB.into(),
         secrets: SecretService::Owned,
+        // The single-surface machine: no Plasma applet, so the tray unit is
+        // the only tray and nothing has to be decided. Handed in rather than
+        // probed so these tests cannot start depending on whether the
+        // developer's own machine happens to have the applet installed.
+        plasmoid: Plasmoid::Absent,
     }
 }
 
@@ -79,6 +84,7 @@ fn opts(prefix: &Path) -> Options {
         dry_run: false,
         force: false,
         consent_fstab: false,
+        tray: None,
     }
 }
 
@@ -387,6 +393,476 @@ fn missing_binaries_are_refused_by_name() {
     assert!(msg.contains("ExecStart"), "{msg}");
 }
 
+// --- two tray surfaces: a decision, never a guess -------------------------
+
+/// Stage a Plasma applet package where `kpackagetool6` would put it for this
+/// user, under a rehearsal prefix.
+fn stage_plasmoid(prefix: &Path) -> PathBuf {
+    let pkg = prefix
+        .join("home/u/.local/share/plasma/plasmoids")
+        .join(probes::PLASMOID_ID);
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(pkg.join("metadata.json"), "{}\n").unwrap();
+    pkg
+}
+
+fn present() -> Plasmoid {
+    Plasmoid::Present {
+        path: PathBuf::from("/home/u/.local/share/plasma/plasmoids").join(probes::PLASMOID_ID),
+    }
+}
+
+fn tray_unit_path(prefix: &Path) -> PathBuf {
+    prefix
+        .join("home/u/.config/systemd/user")
+        .join(units::TRAY_UNIT)
+}
+
+fn tray_link_path(prefix: &Path) -> PathBuf {
+    prefix
+        .join("home/u/.config/systemd/user/graphical-session.target.wants")
+        .join(units::TRAY_UNIT)
+}
+
+#[test]
+fn the_plasmoid_probe_reads_a_package_on_disk_not_a_running_shell() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Path::new("/home/u");
+
+    // The user's own data directory is searched before the system tree: that
+    // is where install-plasmoid.sh puts it, and where kpackagetool6 --show
+    // reported it on the measured machine.
+    let dirs = probes::plasmoid_dirs(tmp.path(), home);
+    assert!(
+        dirs[0].ends_with("home/u/.local/share/plasma/plasmoids"),
+        "{dirs:?}"
+    );
+    assert!(dirs[1].ends_with("usr/share/plasma/plasmoids"), "{dirs:?}");
+
+    assert_eq!(probes::plasmoid_package(tmp.path(), home), Plasmoid::Absent);
+
+    // A bare directory is not an installed applet — kpackagetool6 requires
+    // metadata.json, and a leftover empty directory must not be able to cause
+    // a refusal.
+    let pkg = tmp
+        .path()
+        .join("home/u/.local/share/plasma/plasmoids")
+        .join(probes::PLASMOID_ID);
+    std::fs::create_dir_all(&pkg).unwrap();
+    assert_eq!(probes::plasmoid_package(tmp.path(), home), Plasmoid::Absent);
+
+    std::fs::write(pkg.join("metadata.json"), "{}\n").unwrap();
+    assert_eq!(
+        probes::plasmoid_package(tmp.path(), home),
+        Plasmoid::Present { path: pkg }
+    );
+
+    // A distribution package installs the same tree system-wide; found too.
+    let tmp2 = tempfile::tempdir().unwrap();
+    let sys = tmp2
+        .path()
+        .join("usr/share/plasma/plasmoids")
+        .join(probes::PLASMOID_ID);
+    std::fs::create_dir_all(&sys).unwrap();
+    std::fs::write(sys.join("metadata.json"), "{}\n").unwrap();
+    assert_eq!(
+        probes::plasmoid_package(tmp2.path(), home),
+        Plasmoid::Present { path: sys }
+    );
+}
+
+#[test]
+fn both_surfaces_installed_is_refused_until_one_is_named() {
+    let tmp = tempfile::tempdir().unwrap();
+    let prefix = tmp.path().join("p");
+    std::fs::create_dir_all(&prefix).unwrap();
+    let mut obs = good_observed();
+    obs.plasmoid = present();
+    let f = facts("/home/u/OneDrive", &payload_dir(tmp.path()));
+
+    let planned = install(&f, &Templates::default(), &obs, &opts(&prefix));
+    let msg = refusal(&planned, "tray-surface");
+    // The consequence, named.
+    assert!(msg.contains("two identical icons"), "{msg}");
+    // Both surfaces, and where the applet actually is.
+    assert!(msg.contains(units::TRAY_UNIT), "{msg}");
+    assert!(msg.contains(".local/share/plasma/plasmoids"), "{msg}");
+    // Every way out, including the one that is not this tool's to take.
+    assert!(msg.contains("--tray plasmoid"), "{msg}");
+    assert!(msg.contains("--tray sni"), "{msg}");
+    assert!(msg.contains("--tray none"), "{msg}");
+    assert!(msg.contains("kpackagetool6"), "{msg}");
+    // And why it is asking rather than deciding.
+    assert!(msg.contains("not something this tool can know"), "{msg}");
+
+    assert!(planned.actions.is_none());
+    assert_no_files_under(&prefix);
+
+    // And it is the *only* refusal: while the surface is undecided, no other
+    // check may assert something that depends on the decision. With the tray
+    // binary missing from the payload this would otherwise also refuse for a
+    // binary belonging to a unit nobody has chosen to install.
+    let bin = payload_dir(&tmp.path().join("no-tray"));
+    std::fs::remove_file(bin.join("onedrive-hydration-tray")).unwrap();
+    let f = facts("/home/u/OneDrive", &bin);
+    let planned = install(&f, &Templates::default(), &obs, &opts(&prefix));
+    assert_eq!(
+        planned.refusals().len(),
+        1,
+        "only the open question should refuse: {:#?}",
+        planned.checks
+    );
+}
+
+#[test]
+fn naming_the_applet_drops_the_tray_unit_and_retires_one_already_installed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let prefix = tmp.path().join("p");
+    let f = facts("/home/u/OneDrive", &payload_dir(tmp.path()));
+
+    // An ordinary single-surface install first: the tray unit and its
+    // enablement link land in the prefix.
+    let planned = install(&f, &Templates::default(), &good_observed(), &opts(&prefix));
+    let (_, r) = execute(
+        planned.actions.as_ref().unwrap(),
+        ExecMode {
+            write_files: true,
+            run_commands: false,
+        },
+    );
+    r.unwrap();
+    assert!(tray_unit_path(&prefix).is_file());
+    assert!(std::fs::symlink_metadata(tray_link_path(&prefix)).is_ok());
+
+    // Then the applet is installed and the operator answers the refusal.
+    let mut obs = good_observed();
+    obs.plasmoid = present();
+    let mut o = opts(&prefix);
+    o.tray = Some(Tray::Plasmoid);
+    let planned = install(&f, &Templates::default(), &obs, &o);
+    assert_eq!(planned.refusals(), Vec::<&str>::new());
+    let actions = planned
+        .actions
+        .expect("naming a surface clears the refusal");
+
+    // Nothing writes the tray unit any more...
+    assert!(
+        !actions.iter().any(|a| matches!(
+            a,
+            Action::WriteFile { path, .. } if path.ends_with(units::TRAY_UNIT)
+        )),
+        "{actions:#?}"
+    );
+    // ...and the one already there is stopped before it is deleted, or the
+    // second icon outlives its own unit file until the session ends.
+    let pos = |pred: &dyn Fn(&Action) -> bool| actions.iter().position(pred);
+    let disable = pos(&|a| {
+        matches!(a, Action::Run { argv, .. }
+            if argv.join(" ").contains("disable") && argv.join(" ").contains(units::TRAY_UNIT))
+    })
+    .expect("must stop the running tray");
+    let remove =
+        pos(&|a| matches!(a, Action::RemoveFile { path } if path.ends_with(units::TRAY_UNIT)))
+            .expect("must remove the tray unit");
+    assert!(disable < remove, "stop before delete: {actions:#?}");
+
+    let (log, r) = execute(
+        &actions,
+        ExecMode {
+            write_files: true,
+            run_commands: false,
+        },
+    );
+    r.unwrap();
+    assert!(!tray_unit_path(&prefix).exists());
+    assert!(std::fs::symlink_metadata(tray_link_path(&prefix)).is_err());
+    // The next steps name the applet's own installer, not a unit this run
+    // deliberately did not install.
+    assert!(
+        log.iter().any(|l| l.contains("install-plasmoid.sh")),
+        "{log:#?}"
+    );
+    assert!(
+        !log.iter()
+            .any(|l| l.contains("systemctl --user start onedrive-hydration-tray")),
+        "{log:#?}"
+    );
+}
+
+#[test]
+fn retiring_a_tray_unit_that_was_never_installed_runs_no_command() {
+    // The gate that keeps --tray plasmoid from aborting on a machine that
+    // never had the unit: `systemctl disable --now` on a missing unit fails,
+    // and a failed Run stops the whole install.
+    let tmp = tempfile::tempdir().unwrap();
+    let prefix = tmp.path().join("p");
+    let f = facts("/home/u/OneDrive", &payload_dir(tmp.path()));
+    let mut o = opts(&prefix);
+    o.tray = Some(Tray::Plasmoid);
+    let mut obs = good_observed();
+    obs.plasmoid = present();
+
+    let planned = install(&f, &Templates::default(), &obs, &o);
+    let actions = planned.actions.unwrap();
+    assert!(
+        !actions.iter().any(|a| matches!(
+            a,
+            Action::Run { argv, .. } if argv.join(" ").contains(units::TRAY_UNIT)
+        )),
+        "nothing to disable, so no command: {actions:#?}"
+    );
+}
+
+#[test]
+fn asking_for_both_is_allowed_but_says_so_out_loud() {
+    let tmp = tempfile::tempdir().unwrap();
+    let prefix = tmp.path().join("p");
+    let f = facts("/home/u/OneDrive", &payload_dir(tmp.path()));
+    let mut obs = good_observed();
+    obs.plasmoid = present();
+    let mut o = opts(&prefix);
+    o.tray = Some(Tray::Sni);
+
+    let planned = install(&f, &Templates::default(), &obs, &o);
+    assert_eq!(planned.refusals(), Vec::<&str>::new());
+    let note = planned
+        .checks
+        .iter()
+        .find(|c| c.name == "tray-surface")
+        .map(|c| c.outcome.clone())
+        .unwrap();
+    let Outcome::Caveat(msg) = note else {
+        panic!("an explicit --tray sni next to the applet must still be a caveat: {note:?}");
+    };
+    assert!(msg.contains("both will show an icon"), "{msg}");
+    // Deliberate is deliberate: the unit is still installed.
+    assert!(planned
+        .actions
+        .unwrap()
+        .iter()
+        .any(|a| matches!(a, Action::WriteFile { path, .. } if path.ends_with(units::TRAY_UNIT))));
+}
+
+#[test]
+fn choosing_the_applet_without_one_installed_warns_and_names_the_real_home() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = facts("/home/u/OneDrive", &payload_dir(tmp.path()));
+    let mut o = opts(&tmp.path().join("p"));
+    o.tray = Some(Tray::Plasmoid);
+
+    let planned = install(&f, &Templates::default(), &good_observed(), &o);
+    let Some(Outcome::Caveat(msg)) = planned
+        .checks
+        .iter()
+        .find(|c| c.name == "tray-surface")
+        .map(|c| c.outcome.clone())
+    else {
+        panic!("expected a caveat: {:#?}", planned.checks);
+    };
+    assert!(msg.contains("no tray at all"), "{msg}");
+    // The resolved home, never a guessed /home/<user>.
+    assert!(
+        msg.contains("/home/u/.local/share/plasma/plasmoids"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn tray_none_installs_no_tray_unit_and_says_what_is_lost() {
+    let tmp = tempfile::tempdir().unwrap();
+    let prefix = tmp.path().join("p");
+    let f = facts("/home/u/OneDrive", &payload_dir(tmp.path()));
+    let mut o = opts(&prefix);
+    o.tray = Some(Tray::None);
+
+    let planned = install(&f, &Templates::default(), &good_observed(), &o);
+    assert_eq!(planned.refusals(), Vec::<&str>::new());
+    let Some(Outcome::Caveat(msg)) = planned
+        .checks
+        .iter()
+        .find(|c| c.name == "tray-surface")
+        .map(|c| c.outcome.clone())
+    else {
+        panic!("expected a caveat: {:#?}", planned.checks);
+    };
+    // The exposure warning is the one thing with no other surface (§6.4a).
+    assert!(msg.contains("exposure"), "{msg}");
+
+    let (_, r) = execute(
+        planned.actions.as_ref().unwrap(),
+        ExecMode {
+            write_files: true,
+            run_commands: false,
+        },
+    );
+    r.unwrap();
+    assert!(!tray_unit_path(&prefix).exists());
+    // The rest of the deployment is untouched — including the state service's
+    // activation file, which the applet and the CLI both still need.
+    assert!(prefix
+        .join("home/u/.config/systemd/user/onedrive-hydration.service")
+        .is_file());
+    assert!(prefix
+        .join("home/u/.local/share/dbus-1/services/io.github.franzjeger.OneDriveHydration.service")
+        .is_file());
+}
+
+#[test]
+fn the_tray_binary_is_required_only_when_a_unit_points_at_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = payload_dir(tmp.path());
+    std::fs::remove_file(bin.join("onedrive-hydration-tray")).unwrap();
+    let f = facts("/home/u/OneDrive", &bin);
+
+    // Default surface: a unit names it, so its absence is the usual refusal.
+    let planned = install(
+        &f,
+        &Templates::default(),
+        &good_observed(),
+        &opts(&tmp.path().join("p")),
+    );
+    let msg = refusal(&planned, "binaries");
+    assert!(msg.contains("onedrive-hydration-tray"), "{msg}");
+
+    // Applet surface: nothing points at it, so demanding it would be a
+    // refusal with no reason behind it.
+    let mut o = opts(&tmp.path().join("p"));
+    o.tray = Some(Tray::Plasmoid);
+    let planned = install(&f, &Templates::default(), &good_observed(), &o);
+    assert_eq!(planned.refusals(), Vec::<&str>::new());
+}
+
+#[test]
+fn the_id_the_refusal_searches_for_is_the_package_that_actually_ships() {
+    // A refusal keyed to a stale name is a refusal that can never fire, which
+    // is the one thing this file exists to rule out. Rename the package tree
+    // (or its Id) without renaming the constant and the installer looks for an
+    // applet nobody installs, finds nothing, and cheerfully writes the second
+    // icon. Pinned against the shipped tree rather than trusted.
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packaging/plasmoid")
+        .join(probes::PLASMOID_ID);
+    let metadata = shipped.join("metadata.json");
+    assert!(
+        metadata.is_file(),
+        "no shipped applet at {} — probes::PLASMOID_ID and packaging/plasmoid/ have \
+         drifted apart, and the tray-surface refusal can no longer fire",
+        shipped.display()
+    );
+    // kpackagetool6 installs under KPlugin.Id, not under the directory name,
+    // so the directory agreeing is not enough on its own.
+    let text = std::fs::read_to_string(&metadata).unwrap();
+    assert!(
+        text.contains(&format!("\"Id\": \"{}\"", probes::PLASMOID_ID)),
+        "the applet's KPlugin.Id is what kpackagetool6 installs under, and it is not \
+         {}:\n{text}",
+        probes::PLASMOID_ID
+    );
+}
+
+#[test]
+fn uninstalling_a_deployment_that_has_no_tray_unit_names_none() {
+    // Measured: `systemctl --user disable --now <absent unit>` exits 1, and a
+    // failed Run aborts the plan — which here would happen *after* the
+    // unmount. A deployment installed with --tray plasmoid has no tray unit,
+    // so uninstall must not name one.
+    let tmp = tempfile::tempdir().unwrap();
+    let prefix = tmp.path().join("p");
+    let f = facts("/home/u/OneDrive", &payload_dir(tmp.path()));
+    let mut o = opts(&prefix);
+    o.tray = Some(Tray::Plasmoid);
+
+    let planned = install(&f, &Templates::default(), &good_observed(), &o);
+    let (_, r) = execute(
+        planned.actions.as_ref().unwrap(),
+        ExecMode {
+            write_files: true,
+            run_commands: false,
+        },
+    );
+    r.unwrap();
+    assert!(!tray_unit_path(&prefix).exists());
+
+    let planned = uninstall(&f, false, false, &opts(&prefix));
+    let disable = planned
+        .actions
+        .unwrap()
+        .into_iter()
+        .find_map(|a| match a {
+            Action::Run { argv, .. } if argv.contains(&"disable".to_string()) => Some(argv),
+            _ => None,
+        })
+        .expect("uninstall must disable the user half");
+    assert!(
+        !disable.contains(&units::TRAY_UNIT.to_string()),
+        "no tray unit was installed, so naming it would abort the uninstall: {disable:?}"
+    );
+    // The units that are always there are still named.
+    assert!(disable.contains(&"onedrive-hydration.service".to_string()));
+    assert!(disable.contains(&"onedrive-hydration-dbus.service".to_string()));
+
+    // And when one *is* installed, it is still named — the gate must not turn
+    // into "never disable the tray".
+    let sni = tmp.path().join("q");
+    let planned = install(&f, &Templates::default(), &good_observed(), &opts(&sni));
+    let (_, r) = execute(
+        planned.actions.as_ref().unwrap(),
+        ExecMode {
+            write_files: true,
+            run_commands: false,
+        },
+    );
+    r.unwrap();
+    let planned = uninstall(&f, false, false, &opts(&sni));
+    let disable = planned
+        .actions
+        .unwrap()
+        .into_iter()
+        .find_map(|a| match a {
+            Action::Run { argv, .. } if argv.contains(&"disable".to_string()) => Some(argv),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        disable.contains(&units::TRAY_UNIT.to_string()),
+        "{disable:?}"
+    );
+}
+
+#[test]
+fn a_rehearsal_still_sees_an_applet_the_prefix_does_not_stage() {
+    // The fallback `observe` applies: prefix first, then the machine. Made
+    // testable by pointing `home` at a directory this test owns — searching
+    // from "/" then lands inside it, so "the machine's real answer" is one the
+    // test controls instead of one the developer's desktop decides.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("fakehome");
+    let empty_prefix = tmp.path().join("empty");
+    std::fs::create_dir_all(&empty_prefix).unwrap();
+
+    // Staged on "the machine", nothing under the prefix: the rehearsal must
+    // still find it, or an operator rehearsing before the real run is told
+    // there is no collision and then hits the refusal with sudo already typed.
+    let real = home
+        .join(".local/share/plasma/plasmoids")
+        .join(probes::PLASMOID_ID);
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::write(real.join("metadata.json"), "{}\n").unwrap();
+    assert_eq!(
+        probes::plasmoid_observed(&empty_prefix, &home),
+        Plasmoid::Present { path: real }
+    );
+
+    // A prefix that stages its own answer wins over the machine's, so a test
+    // rig can rehearse a machine it is not running on.
+    let staged_prefix = tmp.path().join("staged");
+    let staged = stage_plasmoid(&staged_prefix);
+    assert_eq!(
+        probes::plasmoid_observed(&staged_prefix, Path::new("/home/u")),
+        Plasmoid::Present { path: staged }
+    );
+}
+
 // --- the namespace-directive scan, against a deliberately bad template ---
 
 #[test]
@@ -432,7 +908,7 @@ fn bad_template_is_refused_by_the_full_flow_and_nothing_is_written() {
 fn shipped_templates_pass_their_own_scan_and_the_sync_unit_is_out_of_scope() {
     let tmp = tempfile::tempdir().unwrap();
     let f = facts("/home/u/OneDrive", &payload_dir(tmp.path()));
-    let rendered = units::render(&Templates::default(), &f);
+    let rendered = units::render(&Templates::default(), &f, Tray::Sni);
     for unit in rendered.system.iter() {
         assert!(
             units::namespace_directives(&unit.text).is_empty(),
@@ -454,7 +930,7 @@ fn shipped_templates_pass_their_own_scan_and_the_sync_unit_is_out_of_scope() {
 fn rendered_units_carry_the_facts_and_no_tokens() {
     let tmp = tempfile::tempdir().unwrap();
     let f = facts("/home/u/OneDrive", &payload_dir(tmp.path()));
-    let rendered = units::render(&Templates::default(), &f);
+    let rendered = units::render(&Templates::default(), &f, Tray::Sni);
     let helper = &rendered.system[0].text;
     assert!(helper.contains("--mount /home/u/OneDrive"));
     assert!(helper.contains("--socket /run/user/1234/onedrive-hydration.sock"));
@@ -492,7 +968,7 @@ fn rendered_units_carry_the_facts_and_no_tokens() {
 fn mount_outside_home_is_rendered_literally() {
     let tmp = tempfile::tempdir().unwrap();
     let f = facts("/srv/onedrive", &payload_dir(tmp.path()));
-    let rendered = units::render(&Templates::default(), &f);
+    let rendered = units::render(&Templates::default(), &f, Tray::Sni);
     assert!(rendered.user[0].text.contains("--mount /srv/onedrive"));
 }
 
@@ -511,7 +987,7 @@ fn keyed(text: &str, key: &str) -> Option<String> {
 fn dbus_activation_file_agrees_with_the_unit_it_starts() {
     let tmp = tempfile::tempdir().unwrap();
     let f = facts("/home/u/OneDrive", &payload_dir(tmp.path()));
-    let rendered = units::render(&Templates::default(), &f);
+    let rendered = units::render(&Templates::default(), &f, Tray::Sni);
     let activation = &rendered.bus_services[0];
     assert_eq!(
         activation.name,
@@ -850,6 +1326,78 @@ fn cli_render_prints_the_whole_generated_set_without_writing() {
         stdout.contains("--mount /nonexistent/on/purpose"),
         "{stdout}"
     );
+}
+
+#[test]
+fn cli_rejects_an_unknown_tray_surface_and_says_why_there_is_no_auto() {
+    let user = std::env::var("USER").unwrap_or_else(|_| "root".into());
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_onedrive-hydration-install"))
+        .args([
+            "render",
+            "--user",
+            &user,
+            "--mount",
+            "/nonexistent/on/purpose",
+            "--client-id",
+            "test-client-id",
+            "--tray",
+            "auto",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // "auto" is the thing someone will reach for; the reason there isn't one
+    // is the answer they need, so it is in the message and not just the docs.
+    assert!(stderr.contains("no auto"), "{stderr}");
+    assert!(
+        stderr.contains("not a fact this installer can measure"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("sni, plasmoid or none"), "{stderr}");
+}
+
+#[test]
+fn cli_render_omits_the_tray_unit_for_the_applet_surface() {
+    let user = std::env::var("USER").unwrap_or_else(|_| "root".into());
+    let run = |tray: &str| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_onedrive-hydration-install"))
+            .args([
+                "render",
+                "--user",
+                &user,
+                "--mount",
+                "/nonexistent/on/purpose",
+                "--client-id",
+                "test-client-id",
+                "--tray",
+                tray,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    // A rendered set is diffed against a deployment's units; if it silently
+    // rendered a surface the deployment does not have, the diff is noise.
+    let sni = run("sni");
+    assert!(sni.contains("tray surface: sni"), "{sni}");
+    assert!(
+        sni.contains(&format!("# ==> {} <==", units::TRAY_UNIT)),
+        "{sni}"
+    );
+
+    let applet = run("plasmoid");
+    assert!(applet.contains("tray surface: plasmoid"), "{applet}");
+    assert!(!applet.contains(units::TRAY_UNIT), "{applet}");
+    // Everything else is still rendered: the applet talks to the same state
+    // service over the same bus name.
+    assert!(
+        applet.contains("# ==> onedrive-hydration-dbus.service <=="),
+        "{applet}"
+    );
+    assert!(applet.contains("# ==> hydrationd.service <=="), "{applet}");
 }
 
 #[test]

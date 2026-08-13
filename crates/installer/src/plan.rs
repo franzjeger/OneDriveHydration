@@ -7,8 +7,8 @@
 //! actually refuses, which is the repository's bar for calling something a
 //! check at all.
 
-use crate::probes::{self, FstabEntry, KernelSupport, MountRow, SecretService, Vantage};
-use crate::units::{self, Rendered, Templates};
+use crate::probes::{self, FstabEntry, KernelSupport, MountRow, Plasmoid, SecretService, Vantage};
+use crate::units::{self, Rendered, Templates, Tray};
 use crate::Facts;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -18,14 +18,19 @@ use std::path::{Path, PathBuf};
 /// anything else is not "less supported", it is a helper that cannot mark.
 const ALLOW_HSM: [&str; 3] = ["ext4", "btrfs", "xfs"];
 
-/// The payload binaries the generated units point at.
-const BINARIES: [&str; 5] = [
+/// The payload binaries every deployment's units point at.
+const BINARIES: [&str; 4] = [
     "hydrationd",
     "onedrive-hydration-daemon",
     "onedrive-hydrationctl",
     "onedrive-hydration-dbus",
-    "onedrive-hydration-tray",
 ];
+
+/// Required only when [`Tray::Sni`] is the surface. The binary check's whole
+/// justification is that a unit's `ExecStart=` must not point at nothing; with
+/// the applet as the surface no unit points here, so demanding it would be a
+/// refusal with no reason behind it.
+const TRAY_BINARY: &str = "onedrive-hydration-tray";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
@@ -60,6 +65,9 @@ pub struct Observed {
     pub mountinfo: String,
     pub fstab: String,
     pub secrets: SecretService,
+    /// Whether the Plasma applet — a tray entry in its own right — is already
+    /// installed for this user. Not "is plasmashell running"; see [`Tray`].
+    pub plasmoid: Plasmoid,
 }
 
 /// Gather the real measurements. `prefix` matters only for fstab: a rehearsal
@@ -78,6 +86,8 @@ pub fn observe(facts: &Facts, prefix: &Path) -> io::Result<Observed> {
         mountinfo: std::fs::read_to_string("/proc/self/mountinfo")?,
         fstab,
         secrets: probes::secret_service(&facts.user, facts.uid),
+        // Same prefix-then-machine rule as fstab above.
+        plasmoid: probes::plasmoid_observed(prefix, &facts.home),
     })
 }
 
@@ -94,6 +104,11 @@ pub struct Options {
     pub force: bool,
     /// Explicit consent to append the (always-`noauto`) fstab line.
     pub consent_fstab: bool,
+    /// Which tray surface this deployment uses. `None` means the operator did
+    /// not say — which is fine while there is only one surface installed, and
+    /// a refusal the moment both are, because two identical icons is not a
+    /// question this tool can answer for them.
+    pub tray: Option<Tray>,
 }
 
 impl Options {
@@ -392,8 +407,138 @@ fn check_secrets(s: &SecretService, real: bool) -> Check {
     }
 }
 
-fn check_binaries(bin_dir: &Path) -> Check {
-    let missing: Vec<String> = BINARIES
+/// Which tray surface this deployment gets, and whether that could be decided
+/// at all.
+///
+/// The collision is real and was measured: the applet is a system-tray entry
+/// in its own right — a running plasmashell adopted it into the tray's
+/// `knownItems` and instantiated it within seconds of `kpackagetool6`
+/// finishing, no restart — so a user who runs this installer *and*
+/// `install-plasmoid.sh` gets two identical icons. Neither surface is wrong;
+/// they cover different desktops. The applet is better where it works (native
+/// look, and it carries the flyout the binary cannot draw) and only works
+/// under plasmashell; the binary covers every desktop with a
+/// `StatusNotifierWatcher` and no plasmashell.
+///
+/// So this returns a decision, never a guess: the one thing measured is
+/// whether the applet package exists, and when it does and nothing was said,
+/// it refuses and asks. See [`Tray`] for why the running desktop is not an
+/// input.
+fn check_tray(plasmoid: &Plasmoid, chosen: Option<Tray>, facts: &Facts) -> (Check, Tray) {
+    let user = &facts.user;
+    let (outcome, tray) = match (plasmoid, chosen) {
+        (Plasmoid::Present { path }, None) => (
+            Outcome::Refuse(format!(
+                "two tray surfaces would be installed, and both draw an icon. The Plasma \
+                 applet is already installed for {user} at {p}, and it is a system-tray \
+                 entry in its own right — plasmashell instantiates it without being asked \
+                 — so enabling {unit} as well puts two identical icons in the tray. Which \
+                 surface this deployment uses is a decision, not a measurement: the applet \
+                 draws only under plasmashell, the binary draws wherever there is a \
+                 StatusNotifierWatcher, and which desktop {user} logs into is not \
+                 something this tool can know at install time. Say which:\n\
+                 \x20   --tray plasmoid   the applet is the surface; the tray unit is not \
+                 installed, and one left by an earlier install is removed\n\
+                 \x20   --tray sni        install the tray unit as well — deliberate, and \
+                 still two icons under plasmashell\n\
+                 \x20   --tray none       no tray; onedrive-hydrationctl status is the \
+                 surface\n\
+                 or remove the applet first:\n\
+                 \x20   kpackagetool6 --type Plasma/Applet --remove {id}",
+                p = path.display(),
+                unit = units::TRAY_UNIT,
+                id = probes::PLASMOID_ID,
+            )),
+            // The plan is refused, so this decides nothing that gets written.
+            // It does decide what the *rest of the checks* then assert, and
+            // `None` is the only honest answer while the question is open: with
+            // `Sni` here, an undecided surface makes the binary check demand
+            // the tray binary and print a second refusal about a unit nobody
+            // has chosen to install — a true-sounding diagnostic for a problem
+            // the operator may not have.
+            Tray::None,
+        ),
+        (Plasmoid::Present { path }, Some(Tray::Sni)) => (
+            Outcome::Caveat(format!(
+                "--tray sni with the Plasma applet installed at {}: under plasmashell both \
+                 will show an icon, and they will look identical. Taken as deliberate — a \
+                 user who logs into both Plasma and a desktop without it needs the binary \
+                 — but it is the state this check exists to stop happening by accident",
+                path.display()
+            )),
+            Tray::Sni,
+        ),
+        (Plasmoid::Present { path }, Some(Tray::Plasmoid)) => (
+            Outcome::Pass(format!(
+                "the Plasma applet at {} is this deployment's tray; {} is not installed, \
+                 and one left by an earlier install is removed below",
+                path.display(),
+                units::TRAY_UNIT
+            )),
+            Tray::Plasmoid,
+        ),
+        (Plasmoid::Absent, None) => (
+            Outcome::Pass(format!(
+                "no Plasma applet is installed for {user}, so {unit} is this deployment's \
+                 tray and there is nothing to collide with. On Plasma the applet is the \
+                 better surface — packaging/plasmoid/install-plasmoid.sh, which this tool \
+                 does not run — and installing it later means re-running this with \
+                 --tray plasmoid, or there will be two icons",
+                unit = units::TRAY_UNIT
+            )),
+            Tray::Sni,
+        ),
+        (Plasmoid::Absent, Some(Tray::Plasmoid)) => (
+            Outcome::Caveat(format!(
+                "--tray plasmoid, but no applet is installed for {user} at any of: {}. \
+                 Nothing is wrong with installing in this order — but until \
+                 packaging/plasmoid/install-plasmoid.sh is run as {user}, this deployment \
+                 has no tray at all",
+                // The real resolved home, never `/home/<user>`: this tool
+                // binds a uid and a home it looked up, and a message that
+                // guessed the path would send someone to the wrong directory.
+                probes::plasmoid_dirs(Path::new("/"), &facts.home)
+                    .iter()
+                    .map(|d| d.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            Tray::Plasmoid,
+        ),
+        (_, Some(Tray::Sni)) => (
+            Outcome::Pass(format!(
+                "{} is this deployment's tray; no Plasma applet is installed for {user}, \
+                 so nothing collides with it",
+                units::TRAY_UNIT
+            )),
+            Tray::Sni,
+        ),
+        (_, Some(Tray::None)) => (
+            Outcome::Caveat(
+                "--tray none: no tray icon is installed, and any left by an earlier \
+                 install is removed below. onedrive-hydrationctl status is then the only \
+                 place the exposure warning appears — the one thing in this product a \
+                 person cannot discover any other way"
+                    .into(),
+            ),
+            Tray::None,
+        ),
+    };
+    (
+        Check {
+            name: "tray-surface",
+            outcome,
+        },
+        tray,
+    )
+}
+
+fn check_binaries(bin_dir: &Path, tray: Tray) -> Check {
+    let mut wanted: Vec<&str> = BINARIES.to_vec();
+    if tray == Tray::Sni {
+        wanted.push(TRAY_BINARY);
+    }
+    let missing: Vec<String> = wanted
         .iter()
         .filter_map(|b| probes::binary_state(bin_dir, b).err())
         .collect();
@@ -498,6 +643,46 @@ fn placement(rendered: &Rendered, facts: &Facts, opts: &Options) -> Vec<Action> 
     actions
 }
 
+/// Take out a tray unit an earlier `--tray sni` install left behind, so that
+/// choosing another surface actually removes the second icon rather than only
+/// declining to add one.
+///
+/// Gated on the unit (or its enablement link) really being there, and that
+/// gate is load-bearing: `systemctl disable --now` on a unit that does not
+/// exist fails, [`Action::Run`] treats a failed command as fatal to the whole
+/// plan, and an ungated cleanup would therefore abort every `--tray plasmoid`
+/// install on a machine that never had the unit. The link is probed with
+/// `symlink_metadata`, not `exists()` — it points at the *runtime* path, which
+/// under a rehearsal prefix is dangling, and `exists()` follows the link and
+/// would report a live enablement as absent.
+fn retire_tray_unit(facts: &Facts, opts: &Options) -> Vec<Action> {
+    let usr_dir = units::user_unit_dir(&opts.prefix, &facts.home);
+    let unit = usr_dir.join(units::TRAY_UNIT);
+    let link = usr_dir
+        .join("graphical-session.target.wants")
+        .join(units::TRAY_UNIT);
+    if !unit.exists() && std::fs::symlink_metadata(&link).is_err() {
+        return Vec::new();
+    }
+    vec![
+        Action::Run {
+            argv: vec![
+                "systemctl".into(),
+                "--user".into(),
+                format!("--machine={}@.host", facts.user),
+                "disable".into(),
+                "--now".into(),
+                units::TRAY_UNIT.into(),
+            ],
+            why: "another surface is this deployment's tray now; stop the second icon \
+                  before removing its unit"
+                .into(),
+        },
+        Action::RemoveFile { path: unit },
+        Action::RemoveFile { path: link },
+    ]
+}
+
 /// Idempotence: rewrite nothing that is already right, refuse to change what
 /// is different, unless forced. Returns refusal messages.
 fn collide(actions: &mut [Action], force: bool) -> Vec<String> {
@@ -585,12 +770,20 @@ pub fn install(
     }
 
     checks.push(check_secrets(&observed.secrets, opts.real()));
-    checks.push(check_binaries(&facts.bin_dir));
 
-    let rendered = units::render(templates, facts);
+    // Decided before the binary check, which depends on it: with the applet as
+    // the surface, no unit points at the tray binary.
+    let (tray_check, tray) = check_tray(&observed.plasmoid, opts.tray, facts);
+    checks.push(tray_check);
+    checks.push(check_binaries(&facts.bin_dir, tray));
+
+    let rendered = units::render(templates, facts, tray);
     checks.push(check_unit_text(&rendered));
 
     let mut actions = placement(&rendered, facts, opts);
+    if tray != Tray::Sni {
+        actions.extend(retire_tray_unit(facts, opts));
+    }
     for msg in collide(&mut actions, opts.force) {
         checks.push(Check {
             name: "collision",
@@ -605,6 +798,29 @@ pub fn install(
         });
     }
 
+    // The tray line says what this run actually decided, not what the product
+    // can do in general: the whole point of --tray is that the choice stops
+    // being silent, and next-steps that named a unit this run did not install
+    // would put it straight back.
+    let tray_next = match tray {
+        Tray::Sni => format!(
+            "the tray starts with the next graphical session, or now with: systemctl \
+             --user start {unit} (icons: run packaging/icons/install-icons.sh once \
+             per user)",
+            unit = units::TRAY_UNIT
+        ),
+        Tray::Plasmoid => format!(
+            "the tray is the Plasma applet, which this tool did not install and will \
+             not — as {u}, and in this order: packaging/icons/install-icons.sh, then \
+             packaging/plasmoid/install-plasmoid.sh; a running plasmashell picks up a \
+             first install by itself",
+            u = facts.user
+        ),
+        Tray::None => "no tray was installed (--tray none); onedrive-hydrationctl \
+                       status is the surface, and the only place the exposure warning \
+                       appears"
+            .to_string(),
+    };
     actions.push(Action::Manual {
         text: format!(
             "next: sudo systemctl daemon-reload  (the path unit is enabled by its \
@@ -616,13 +832,12 @@ pub fn install(
              the first time anything talks to its name (the tray, busctl, the \
              flyout); a session bus that predates this install may need one \
              log-out/log-in to notice the new activation file\n\
-             the tray starts with the next graphical session, or now with: systemctl \
-             --user start onedrive-hydration-tray.service (icons: run \
-             packaging/icons/install-icons.sh once per user)\n\
+             {tray_next}\n\
              not enrolled yet? as {u}: onedrive-hydration-daemon auth --state-dir \
              ~/.local/state/onedrive-hydration --client-id <the id you passed>\n\
              this tool did NOT create the subvolume, did NOT edit fstab beyond what \
-             was shown, and did NOT touch credentials — those stay yours",
+             was shown, did NOT install the Plasma applet, and did NOT touch \
+             credentials — those stay yours",
             u = facts.user
         ),
     });
@@ -720,22 +935,36 @@ pub fn uninstall(facts: &Facts, mounted: bool, and_unmount: bool, opts: &Options
                 .into(),
         });
     }
-    actions.push(Action::Run {
-        argv: vec![
-            "systemctl".into(),
-            "--user".into(),
-            format!("--machine={}@.host", facts.user),
-            "disable".into(),
-            "--now".into(),
-            "onedrive-hydration.service".into(),
-            "onedrive-hydration-dbus.service".into(),
-            "onedrive-hydration-tray.service".into(),
-        ],
-        why: "stop and disable the user half".into(),
-    });
-
     let sys_dir = units::system_unit_dir(&opts.prefix);
     let usr_dir = units::user_unit_dir(&opts.prefix, &facts.home);
+
+    // The tray unit is named only when it is really there. Not every
+    // deployment has one: `--tray plasmoid` and `--tray none` install none.
+    // Measured — `systemctl --user disable --now <absent unit>` exits 1
+    // ("Unit ... does not exist"), and `Action::Run` treats a failed command
+    // as fatal — so naming it unconditionally would abort the uninstall
+    // *after* the unmount, leaving exactly the half-removed deployment the
+    // ordering above exists to avoid. The `RemoveFile`s below need no such
+    // gate; they tolerate absence by design.
+    let mut user_units = vec![
+        "onedrive-hydration.service".to_string(),
+        "onedrive-hydration-dbus.service".to_string(),
+    ];
+    if usr_dir.join(units::TRAY_UNIT).exists() {
+        user_units.push(units::TRAY_UNIT.to_string());
+    }
+    let mut argv = vec![
+        "systemctl".to_string(),
+        "--user".to_string(),
+        format!("--machine={}@.host", facts.user),
+        "disable".to_string(),
+        "--now".to_string(),
+    ];
+    argv.extend(user_units);
+    actions.push(Action::Run {
+        argv,
+        why: "stop and disable the user half".into(),
+    });
     for name in ["hydrationd.service", "hydrationd.path"] {
         actions.push(Action::RemoveFile {
             path: sys_dir.join(name),
@@ -747,7 +976,7 @@ pub fn uninstall(facts: &Facts, mounted: bool, and_unmount: bool, opts: &Options
     for name in [
         "onedrive-hydration.service",
         "onedrive-hydration-dbus.service",
-        "onedrive-hydration-tray.service",
+        units::TRAY_UNIT,
     ] {
         actions.push(Action::RemoveFile {
             path: usr_dir.join(name),
@@ -762,13 +991,13 @@ pub fn uninstall(facts: &Facts, mounted: bool, and_unmount: bool, opts: &Options
             .join("io.github.franzjeger.OneDriveHydration.service"),
     });
     for link in [
-        "default.target.wants/onedrive-hydration.service",
+        "default.target.wants/onedrive-hydration.service".to_string(),
         // Written by installs that predate D-Bus activation of the state
         // service; current installs write no such link, but an uninstall has
         // to clean up the deployments that exist, not the ones this version
         // would make.
-        "default.target.wants/onedrive-hydration-dbus.service",
-        "graphical-session.target.wants/onedrive-hydration-tray.service",
+        "default.target.wants/onedrive-hydration-dbus.service".to_string(),
+        format!("graphical-session.target.wants/{}", units::TRAY_UNIT),
     ] {
         actions.push(Action::RemoveFile {
             path: usr_dir.join(link),
@@ -781,6 +1010,9 @@ pub fn uninstall(facts: &Facts, mounted: bool, and_unmount: bool, opts: &Options
     actions.push(Action::Manual {
         text: format!(
             "left in place on purpose:\n\
+             - the Plasma applet, if one is installed: this tool never installed it, \
+             and a per-user applet is the user's own session data. Remove it \
+             yourself, as {u}:  kpackagetool6 --type Plasma/Applet --remove {id}\n\
              - the fstab line for {mount} (inert with noauto; remove it yourself if \
              the volume is going away)\n\
              - the subvolume/volume itself; when — and only when — nothing unsent \
@@ -789,7 +1021,8 @@ pub fn uninstall(facts: &Facts, mounted: bool, and_unmount: bool, opts: &Options
              - the refresh token in {u}'s Secret Service and the state directory \
              ~{u}/.local/state/onedrive-hydration; remove them with your keyring tool \
              and rm -r if the account is being abandoned",
-            u = facts.user
+            u = facts.user,
+            id = probes::PLASMOID_ID
         ),
     });
 

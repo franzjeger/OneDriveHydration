@@ -16,8 +16,10 @@ refuses, and says precisely why:
 
 ```
 onedrive-hydration-install install --user <name> --mount <path> --client-id <uuid>
+                                   [--tray sni|plasmoid|none]
 onedrive-hydration-install uninstall --user <name> --mount <path> [--and-unmount]
 onedrive-hydration-install render  --user <name> --mount <path> --client-id <uuid>
+                                   [--tray sni|plasmoid|none]
 ```
 
 It refuses to write anything when: the kernel predates fanotify pre-content
@@ -31,9 +33,10 @@ bus (enrollment fails closed without it); a payload binary the units point at
 is missing; the named user does not resolve; the installer itself is running in
 a private mount namespace (its answers would describe the sandbox, not the
 machine); an existing generated file — a unit or the D-Bus activation file —
-differs from what would be generated (`--force` to overwrite); or — checked in
-the generated text, not assumed from the templates — a helper unit carries any
-namespace-creating directive.
+differs from what would be generated (`--force` to overwrite); two tray
+surfaces would end up installed and no `--tray` said which one this deployment
+uses; or — checked in the generated text, not assumed from the templates — a
+helper unit carries any namespace-creating directive.
 
 Every one of those refusals is exercised in `crates/installer/tests/refusals.rs`,
 including the namespace scan against a deliberately poisoned template. A
@@ -44,7 +47,11 @@ btrfs subvolume (the command is printed instead — that is your storage layout
 and a destructive operation); it does not touch `/etc/fstab` without
 `--consent-fstab`, and there is no code path that composes an entry without
 `noauto`; it does not enroll credentials or invent a client id — `--client-id`
-is required, and it is public configuration, never a secret.
+is required, and it is public configuration, never a secret; and it does not
+install or remove the Plasma applet, which is a per-user operation on the
+user's own session data — `packaging/plasmoid/install-plasmoid.sh` is printed
+instead, and `uninstall` names the `kpackagetool6 --remove` line rather than
+running it.
 
 `--prefix <dir>` rehearses an install or uninstall against a scratch root:
 files land under the prefix, no command is ever executed. `render` prints the
@@ -94,6 +101,35 @@ three lifecycles, and the units say so instead of sharing one `WantedBy=`:
   the same target), so the unit retries on a five-second spacing and gives up
   after ~ten attempts: a desktop that will never show a tray gets one visibly
   failed unit, not an all-session respawn loop.
+
+  It is also the one unit a deployment may not want, because it is not the
+  only tray surface. The Plasma applet in `packaging/plasmoid/` is a
+  system-tray entry in its own right — a running plasmashell adopts and
+  instantiates it within seconds of `kpackagetool6` finishing, no restart —
+  so a Plasma user who runs both this installer and `install-plasmoid.sh`
+  gets two identical icons. `--tray` says which surface this deployment uses:
+  `sni` writes and enables this unit, `plasmoid` writes neither it nor its
+  enablement link (and stops and removes one an earlier install left, so the
+  answer removes the second icon rather than only declining to add another),
+  `none` installs no tray at all and says what that costs — the §6.4a
+  exposure warning then exists only in `onedrive-hydrationctl status`.
+
+  Left unsaid it defaults to `sni`, *unless* the applet is already installed
+  for that user, which is refused until one of the three is named. There is
+  no `auto`. The applet only draws under plasmashell and the binary draws
+  wherever a `StatusNotifierWatcher` exists, so the answer depends on the
+  desktop — and the desktop is not a fact at install time: this unit starts at
+  *session* start, the installer runs as root from a shell that usually has no
+  session, and a machine installed under Plasma can be logged into under sway
+  tomorrow. Detecting a running `plasmashell` would make the installed set
+  depend on what happened to be running when `sudo` was typed, which is the
+  same shape as every other refusal here — a deployment whose facts came from
+  somewhere other than the deployment. What *is* durable, and what the check
+  reads instead, is whether the applet package is on disk
+  (`~/.local/share/plasma/plasmoids/`, or the system tree a distribution
+  package would use). The binary check follows the decision: with the applet
+  as the surface, no unit points at `onedrive-hydration-tray`, so its absence
+  is no longer a refusal.
 
 Uninstall makes one promise that outranks tidiness: `hydrationd` is never left
 stopped — or deleted — while the sync root is still mounted, because a marked

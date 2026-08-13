@@ -3,7 +3,7 @@
 
 use onedrive_hydration_install::plan::{self, ExecMode, Options, Outcome};
 use onedrive_hydration_install::probes;
-use onedrive_hydration_install::units::Templates;
+use onedrive_hydration_install::units::{Templates, Tray};
 use onedrive_hydration_install::Facts;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -12,9 +12,11 @@ fn usage() -> ! {
     eprintln!(
         "usage:\n  onedrive-hydration-install install --user <name> --mount <path> \
          --client-id <uuid>\n      [--bin-dir <dir>] [--prefix <dir>] [--dry-run] [--force] \
-         [--consent-fstab]\n  onedrive-hydration-install uninstall --user <name> --mount <path>\n      \
+         [--consent-fstab]\n      [--tray sni|plasmoid|none]\n  \
+         onedrive-hydration-install uninstall --user <name> --mount <path>\n      \
          [--prefix <dir>] [--dry-run] [--and-unmount]\n  onedrive-hydration-install render \
-         --user <name> --mount <path> --client-id <uuid>\n      [--bin-dir <dir>]\n\n\
+         --user <name> --mount <path> --client-id <uuid>\n      [--bin-dir <dir>] \
+         [--tray sni|plasmoid|none]\n\n\
          render prints the units install would write — for review, and for diffing an\n\
          already-deployed set against what this version generates. It validates nothing\n\
          except the generated text itself and writes no files.\n\n\
@@ -22,7 +24,17 @@ fn usage() -> ! {
          this user, uid, sync root and runtime socket — or refuses, saying why.\n\n\
          It will never: create or delete the btrfs subvolume (the command is printed\n\
          instead); touch /etc/fstab without --consent-fstab, and never without noauto;\n\
-         enroll credentials or invent a client id.\n\n\
+         enroll credentials or invent a client id; install the Plasma applet.\n\n\
+         --tray picks which surface draws the tray icon. There is no auto: the applet\n\
+         is a tray entry in its own right, so installing both shows two identical\n\
+         icons, and which desktop the user logs into is not a fact at install time.\n\
+         sni      onedrive-hydration-tray.service — any StatusNotifierWatcher\n\
+         plasmoid the Plasma applet (packaging/plasmoid/install-plasmoid.sh, which\n\
+                  this tool does not run); a tray unit from an earlier install is\n\
+                  removed\n\
+         none     no tray; onedrive-hydrationctl status is the surface\n\
+         Left out, it defaults to sni — unless the applet is already installed for\n\
+         that user, which is refused until one of the three is named.\n\n\
          --prefix <dir> rehearses against a scratch root: files land under the prefix\n\
          and no command is executed. --dry-run prints everything and writes nothing."
     );
@@ -59,6 +71,7 @@ fn parse() -> Cli {
         dry_run: false,
         force: false,
         consent_fstab: false,
+        tray: None,
     };
     let mut and_unmount = false;
     fn take(args: &mut impl Iterator<Item = String>) -> String {
@@ -74,6 +87,22 @@ fn parse() -> Cli {
             "--dry-run" => opts.dry_run = true,
             "--force" => opts.force = true,
             "--consent-fstab" => opts.consent_fstab = true,
+            "--tray" => {
+                let v = take(&mut args);
+                // A specific complaint rather than the whole usage block: the
+                // one thing someone reaching for --tray is likely to try is
+                // "auto", and the reason there isn't one is the answer they
+                // need.
+                opts.tray = Some(Tray::parse(&v).unwrap_or_else(|| {
+                    eprintln!(
+                        "--tray {v:?}: expected sni, plasmoid or none. There is no auto — \
+                         which desktop this user logs into is not a fact this installer \
+                         can measure, and guessing it decides which tray surface gets \
+                         installed"
+                    );
+                    std::process::exit(2)
+                }));
+            }
             "--and-unmount" => and_unmount = true,
             _ => usage(),
         }
@@ -136,7 +165,16 @@ fn main() -> io::Result<()> {
         // The one validation that still applies is the one about this text
         // itself — a reviewer must not be shown a unit the installer would
         // refuse.
-        let rendered = onedrive_hydration_install::units::render(&Templates::default(), &facts);
+        //
+        // render looks at no machine, so it cannot see whether the applet is
+        // installed and cannot reach install's refusal. It renders for the
+        // surface it was told, defaults to the same sni that install defaults
+        // to, and says which — a set diffed against a deployment's units has
+        // to be the set for the same tray surface or the diff is noise.
+        let tray = cli.opts.tray.unwrap_or(Tray::Sni);
+        println!("tray surface: {} (--tray)", tray.as_str());
+        let rendered =
+            onedrive_hydration_install::units::render(&Templates::default(), &facts, tray);
         for unit in rendered.all() {
             println!("# ==> {} <==", unit.name);
             print!("{}", unit.text);
