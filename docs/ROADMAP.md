@@ -25,7 +25,26 @@
 - [x] Download throttling and disconnect fault-injection tests
 - [ ] Process-restart fault-injection tests
 
+## M2.5: complete sync semantics — release blocker
+
+- [x] Pin the HydrationAPI stabilization revision
+- [x] Separate cTag from QuickXorHash while verifying both for full hydration
+- [x] Preserve atomic-save identity and its base cTag
+- [x] Propagate same-folder file rename as a conditional item-ID operation
+- [x] Carry the recorded cTag into local deletion
+- [x] Pair split rename events before drawing a destructive conclusion
+- [ ] Give local folders durable cloud identity
+- [ ] Create and retain empty folders in both directions
+- [ ] Move files between parents by destination folder ID
+- [ ] Implement guarded local folder create, rename, move and delete
+- [ ] Pass the two-device conflict and process-restart matrix in
+      [the sync correctness gate](SYNC-ACCEPTANCE.md)
+- [ ] Pass the complete matrix against a dedicated non-production tenant
+
 ## M3: Linux product shell
+
+Feature work in this milestone is frozen until M2.5 is complete. Changes needed
+to expose an honest sync error or unsupported operation are still in scope.
 
 - [x] Owner-only local status and eviction CLI
 - [x] D-Bus control surface

@@ -23,6 +23,12 @@ threat-model review. Dolphin has the action half of its integration ("Free Up Sp
 shipped as data); the status overlays are not built, because they are the one surface
 with no data-only path. It is not ready for user data.
 
+Namespace correctness, not desktop polish, is the release blocker. The pinned HydrationAPI
+revision gives same-folder file rename, atomic-save identity and conditional deletion an
+explicit contract. Cross-folder local moves and local folder operations remain unsupported.
+Product-shell feature work is frozen until the blocking rows in the
+[sync correctness gate](docs/SYNC-ACCEPTANCE.md) pass against a dedicated test tenant.
+
 ## Design rules
 
 - The privileged helper never receives credentials and never opens network connections.
