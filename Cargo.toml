@@ -10,8 +10,8 @@ rust-version = "1.85"
 [workspace.dependencies]
 blocking = "1"
 libc = "0.2"
-hydration-client = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "33aac1498032d9ffe0c2a63f7ad0705d16a76533" }
-hydration-graph = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "33aac1498032d9ffe0c2a63f7ad0705d16a76533", features = ["http"] }
+hydration-client = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "b2f1b72d5f5538e3845624a0092d71a3a52fec60" }
+hydration-graph = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "b2f1b72d5f5538e3845624a0092d71a3a52fec60", features = ["http"] }
 keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
 # "event" is one zero-timeout poll: how the auth-state socket notices a
 # watcher hung up during a quiet stretch without reading from it.
