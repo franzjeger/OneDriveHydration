@@ -235,16 +235,53 @@ fn the_keep_on_device_wrapper_never_opens_the_file() {
 }
 
 #[test]
-fn the_installer_makes_the_servicemenu_executable() {
+fn the_folder_entry_matches_directories_and_only_keep_on_device() {
+    let desktop = read("servicemenu-folder.desktop.in");
+    assert_eq!(keyed(&desktop, "Type=").as_deref(), Some("Service"));
+
+    // inode/directory, measured with probes/servicemenu-match.cpp on KIO 6.28:
+    // reaches a directory, NOT a regular file (so it never doubles the file
+    // entry's Keep on Device), survives a multi-directory selection, and matches
+    // nothing for a mixed file+directory selection.
+    assert_eq!(
+        keyed(&desktop, "MimeType=").as_deref(),
+        Some("inode/directory;")
+    );
+
+    // Only Keep on Device — Free Up Space is never offered on a folder, because
+    // the daemon has no bulk evict.
+    let actions = keyed(&desktop, "Actions=").expect("Actions= must be present");
+    assert!(
+        actions.contains("onedriveHydrationKeepOnDevice"),
+        "{actions}"
+    );
+    assert!(
+        !actions.contains("FreeUpSpace"),
+        "Free Up Space must not reach a directory: {actions}"
+    );
+
+    // The same wrapper the file entry names (@ACTION2@), same %F contract.
+    let exec = keyed(&desktop, "Exec=").expect("the folder action needs an Exec");
+    assert!(exec.ends_with(" %F"), "{exec}");
+    assert!(exec.contains("@ACTION2@"), "{exec}");
+    assert_eq!(keyed(&desktop, "Icon=").as_deref(), Some(ICON_APP));
+}
+
+#[test]
+fn the_installer_makes_both_servicemenus_executable() {
     // Plasma 6 answers "You are not authorized to execute this file" when a
     // servicemenu action is clicked and the .desktop it lives in is not itself
     // executable — the entry appears, then cannot run. Measured on plasmashell
-    // 6.7.4. So the installer must chmod the menu file, not only the wrappers it
-    // points at.
+    // 6.7.4. The installer generates the file and folder menus in a loop and
+    // must chmod each one, not only the wrappers they point at.
     let install = read("install-servicemenu.sh");
     assert!(
-        install.contains("chmod 755 \"$menu_dir/onedrive-hydration.desktop.tmp\""),
-        "the installer must make the servicemenu .desktop executable, not only the wrappers"
+        install.contains("chmod 755 \"$mdst.tmp\""),
+        "the installer must make each generated menu .desktop executable"
+    );
+    assert!(
+        install.contains("servicemenu-folder.desktop.in=onedrive-hydration-folder.desktop"),
+        "the installer must generate the folder menu entry too"
     );
 }
 

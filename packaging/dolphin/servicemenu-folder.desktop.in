@@ -1,0 +1,27 @@
+[Desktop Entry]
+Type=Service
+# The folder half of Keep on Device, kept a *separate* entry from the file one so
+# that only Keep on Device reaches a directory — Free Up Space stays file-only,
+# because the daemon offers no bulk evict.
+#
+# Measured on this KIO build with probes/servicemenu-match.cpp (plasmashell
+# 6.7.4, KIO 6.28), not taken from documentation. Against a control that returned
+# no actions, an inode/directory entry:
+#   * appears for a directory,
+#   * does NOT appear for a regular file (so it never doubles the file entry),
+#   * survives a multi-directory selection, so Exec=... %F and the wrapper's loop
+#     are honest,
+#   * disappears entirely for a mixed file+directory selection — so a mixed
+#     selection offers nothing rather than the wrong thing, exactly as the
+#     all/allfiles file entry does for its mirror case.
+MimeType=inode/directory;
+Actions=onedriveHydrationKeepOnDevice;
+
+[Desktop Action onedriveHydrationKeepOnDevice]
+# The same wrapper the file entry names (@ACTION2@ = keep-on-device.sh): it pins
+# the directory and then pulls its dehydrated files down one at a time via the
+# daemon's `pending` enumeration. A directory reaching keep-on-device.sh is the
+# case that wrapper's `[ -d ]` branch exists for.
+Name=Keep on Device
+Icon=onedrive-hydration
+Exec=@ACTION2@ %F
