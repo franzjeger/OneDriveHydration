@@ -8,14 +8,14 @@ reason the tray is a StatusNotifierItem and the flyout is QML: the file manager
 already knows how to draw a menu, and a toolkit would buy nothing. Zero new Rust
 dependencies; `cargo deny check` sees an unchanged graph.
 
-Both are file-only, sharing the one measured `all/allfiles` matching. Keep on
-Device works on a file by `pin`-ning it and then asking `onedrive-hydrationctl
-hydrate` to read it down; the wrapper never opens the file itself, so the read
-that hydrates stays in the one process that is neither the daemon nor the helper
-(§6a-ter). A directory pin — which the daemon and the `pin` verb already
-support — and folder-recursive hydration are a deliberate follow-up: the first
-needs `inode/directory` matching that `probes/servicemenu-match.cpp` has not yet
-measured, the second an enumeration verb that is not built.
+Free Up Space is file-only; Keep on Device reaches files *and* folders, but
+through two separate menu entries so that only Keep on Device appears on a folder
+— the daemon offers no bulk evict, so Free Up Space never should. Keep on Device
+works on a file by `pin`-ning it and asking `onedrive-hydrationctl hydrate` to
+read it down, and on a folder by pinning it once (the pin protects the subtree)
+and pulling its dehydrated files down one at a time via the daemon's `pending`
+enumeration. The wrapper never opens a file itself, so the read that hydrates
+stays in the one process that is neither the daemon nor the helper (§6a-ter).
 
 Install per user, after `../icons/install-icons.sh`:
 
@@ -35,7 +35,8 @@ It writes two files under `$XDG_DATA_HOME` (default `~/.local/share`):
 
 | | |
 |---|---|
-| `kio/servicemenus/onedrive-hydration.desktop` | the menu entry (both actions) |
+| `kio/servicemenus/onedrive-hydration.desktop` | the file entry (both actions) |
+| `kio/servicemenus/onedrive-hydration-folder.desktop` | the folder entry (Keep on Device only) |
 | `onedrive-hydration/free-up-space.sh` | the Free Up Space wrapper |
 | `onedrive-hydration/keep-on-device.sh` | the Keep on Device wrapper |
 
@@ -45,10 +46,14 @@ With `probes/servicemenu-match.cpp`, which builds the real `KFileItemActions`
 menu and prints it. Full detail in `docs/DOLPHIN-GROUNDWORK.md`.
 
 * `MimeType=all/allfiles;` reaches a regular file of any mimetype, and does
-  **not** reach a directory — which is what is wanted, because `evict` takes a
-  file and there is no bulk-evict to offer on a folder.
+  **not** reach a directory — which is what the file entry wants, because
+  Free Up Space takes a file and there is no bulk-evict to offer on a folder.
+* `MimeType=inode/directory;` (the folder entry, measured on KIO 6.28) reaches a
+  directory and **not** a regular file, so the folder entry never doubles the
+  file entry's Keep on Device. It survives a multi-directory selection.
 * The entry survives a multi-file selection, so `%F` and the wrapper's loop
-  are honest. A mixed file+directory selection matches nothing at all.
+  are honest. A mixed file+directory selection matches nothing at all — for
+  either entry — so a mixed selection offers nothing rather than the wrong thing.
 * A dropped-in servicemenu is picked up by a freshly started process with no
   `kbuildsycoca6` and no cache rebuild, so the script tells nobody to rebuild
   anything. Whether an already-open window rescans was not measured, and is
@@ -88,15 +93,15 @@ workspace, and a `.so` installed as root) rather than more of the same work.
 `docs/DOLPHIN-GROUNDWORK.md` records what it would need, including the per-file
 xattrs that are already on disk and the `st_blocks` trap it must not fall into.
 
-**A folder action, for now.** Both entries are file-only. Free Up Space stays
-that way on purpose — recursing in shell would invent a bulk evict the daemon
-does not offer, with none of its judgment about what is safe. Keep on Device
-*could* grow one, since a directory pin is one `setxattr` the daemon already
-does and hydration is safe to recurse; but it needs `inode/directory` servicemenu
-matching (unmeasured on this KIO build) and a content-free enumeration verb to
-list what to pull down. Both are enumerated in `HydrationAPI`'s
-`docs/KEEP-ON-DEVICE-GROUNDWORK.md` (§3) and left to a follow-up rather than
-shipped as an unverified claim or a shell tree-walk.
+**Free Up Space on a folder.** Free Up Space stays file-only on purpose —
+recursing in shell would invent a bulk evict the daemon does not offer, with none
+of its judgment about what is safe. That is why the folder entry
+(`servicemenu-folder.desktop.in`, `MimeType=inode/directory;`) carries *only* Keep
+on Device: Free Up Space is deliberately absent from a directory's menu. Keep on
+Device's folder recursion is safe by contrast — the daemon's `pending` verb lists
+the dehydrated files with its own judgment (confinement, skipping the framework's
+own names), and the wrapper hydrates each; see `HydrationAPI`'s
+`docs/KEEP-ON-DEVICE-GROUNDWORK.md` §3.
 
 **Anything to do with `/usr/lib/qt6/plugins/kf6/overlayicon/onedrive-overlay.so`.**
 An unpackaged overlay plugin from the donor client may still be installed

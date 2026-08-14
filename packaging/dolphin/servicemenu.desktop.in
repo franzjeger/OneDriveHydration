@@ -32,12 +32,10 @@ Exec=@ACTION@ %F
 
 [Desktop Action onedriveHydrationKeepOnDevice]
 # The inverse of Free Up Space: pin the selected files so eviction skips them,
-# and pull their content down now. File-only for the same reason the whole entry
-# is (MimeType above): it shares that measured matching, and a directory pin —
-# which the daemon and `pin` verb already support — needs `inode/directory`,
-# which probes/servicemenu-match.cpp has not yet measured on this KIO build. So
-# that, and folder-recursive hydration, are a deliberate follow-up rather than an
-# unverified claim here.
+# and pull their content down now. This is the *file* case (MimeType above);
+# the directory case lives in servicemenu-folder.desktop.in as its own entry,
+# so that only Keep on Device — not Free Up Space — reaches a folder. Both point
+# at the same wrapper.
 Name=Keep on Device
 Icon=onedrive-hydration
 # A second wrapper, substituted to its own absolute path by the installer. Same
