@@ -101,9 +101,49 @@ for f in "$@"; do
             ;;
     esac
 
-    # Then hydrate, by absolute path, so the ctl binary opens exactly the file
-    # Dolphin named. A directory would fail to open here; folder-recursive
-    # hydration is a separate, enumerated operation and not this wrapper's job.
+    # A directory is pinned as a single mark — it protects its whole subtree —
+    # and its dehydrated files are pulled down one at a time. The daemon lists
+    # them with its own judgment (confinement, and skipping the framework's own
+    # names), and each is hydrated here; the reads stay inside
+    # onedrive-hydrationctl, never in this shell. Fed by a here-doc rather than a
+    # pipe, so the running total is not lost to a subshell.
+    if [ -d "$abs" ]; then
+        listing=$("$CTL" pending "$rel" 2>&1) || true
+        case "$listing" in
+            error:*)
+                problems="${problems}${abs}
+    pinned, but could not list its contents: ${listing}
+"
+                continue
+                ;;
+        esac
+        # An empty listing is a valid answer: nothing dehydrated to pull down.
+        while IFS= read -r childrel; do
+            [ -n "$childrel" ] || continue
+            reply=$("$CTL" hydrate "$MOUNT/$childrel" 2>&1) || true
+            case "$reply" in
+                "hydrated "*" bytes")
+                    n=${reply#hydrated }
+                    n=${n% bytes}
+                    case "$n" in
+                        '' | *[!0-9]*) n=0 ;;
+                    esac
+                    pulled=$((pulled + n))
+                    ;;
+                *)
+                    problems="${problems}${MOUNT}/${childrel}
+    ${reply}
+"
+                    ;;
+            esac
+        done <<EOF
+$listing
+EOF
+        continue
+    fi
+
+    # A file: hydrate it directly, by absolute path, so the ctl binary opens
+    # exactly the file named.
     reply=$("$CTL" hydrate "$abs" 2>&1) || true
     case "$reply" in
         "hydrated "*" bytes")

@@ -91,6 +91,13 @@ done
 
 sed -e "s|@ACTION@|$action|g" -e "s|@ACTION2@|$action2|g" \
     "$here/servicemenu.desktop.in" > "$menu_dir/onedrive-hydration.desktop.tmp"
+# The menu file itself must be executable, not only the wrappers it points at.
+# Measured on plasmashell 6.7.4: a servicemenu .desktop without the bit makes
+# Dolphin answer "You are not authorized to execute this file" the moment the
+# action is clicked — the entry appears, and then cannot run. KDE trusts a
+# servicemenu to launch a process only when the file it reads it from is itself
+# marked executable.
+chmod 755 "$menu_dir/onedrive-hydration.desktop.tmp"
 mv -f "$menu_dir/onedrive-hydration.desktop.tmp" "$menu_dir/onedrive-hydration.desktop"
 
 printf 'installed:\n  %s\n  %s\n  %s/onedrive-hydration.desktop\n' \
