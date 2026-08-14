@@ -74,18 +74,27 @@ esac
 action_dir=$data_home/onedrive-hydration
 menu_dir=$data_home/kio/servicemenus
 action=$action_dir/free-up-space.sh
+action2=$action_dir/keep-on-device.sh
 mkdir -p "$action_dir" "$menu_dir"
 
-sed -e "s|@MOUNT@|$mount|g" -e "s|@CTL@|$bin_dir/onedrive-hydrationctl|g" \
-    "$here/free-up-space.sh.in" > "$action.tmp"
-chmod 755 "$action.tmp"
-mv -f "$action.tmp" "$action"
+# Both wrappers get the same two substitutions, in the same way, for the same
+# reason: the sync root and the CLI's absolute path are baked in because a
+# detached Dolphin action has no configuration to read them from.
+for src_dst in "free-up-space.sh.in=$action" "keep-on-device.sh.in=$action2"; do
+    src=${src_dst%%=*}
+    dst=${src_dst#*=}
+    sed -e "s|@MOUNT@|$mount|g" -e "s|@CTL@|$bin_dir/onedrive-hydrationctl|g" \
+        "$here/$src" > "$dst.tmp"
+    chmod 755 "$dst.tmp"
+    mv -f "$dst.tmp" "$dst"
+done
 
-sed -e "s|@ACTION@|$action|g" \
+sed -e "s|@ACTION@|$action|g" -e "s|@ACTION2@|$action2|g" \
     "$here/servicemenu.desktop.in" > "$menu_dir/onedrive-hydration.desktop.tmp"
 mv -f "$menu_dir/onedrive-hydration.desktop.tmp" "$menu_dir/onedrive-hydration.desktop"
 
-printf 'installed:\n  %s\n  %s/onedrive-hydration.desktop\n' "$action" "$menu_dir"
+printf 'installed:\n  %s\n  %s\n  %s/onedrive-hydration.desktop\n' \
+    "$action" "$action2" "$menu_dir"
 printf 'sync root: %s\n' "$mount"
 
 # Measured with probes/servicemenu-match.cpp: a servicemenu dropped into the
