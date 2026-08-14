@@ -10,6 +10,7 @@ fn usage() -> ! {
          onedrive-hydrationctl [--socket <path>] evict <relative-path>\n  \
          onedrive-hydrationctl [--socket <path>] pin <relative-path>\n  \
          onedrive-hydrationctl [--socket <path>] unpin <relative-path>\n  \
+         onedrive-hydrationctl [--socket <path>] pending <relative-dir>\n  \
          onedrive-hydrationctl hydrate <path>"
     );
     std::process::exit(2)
@@ -17,9 +18,11 @@ fn usage() -> ! {
 
 /// What the arguments asked for.
 ///
-/// `status`/`evict`/`pin`/`unpin` are lines the daemon answers — the paths are
-/// relative to the sync root, which is where the daemon resolves and confines
-/// them. `hydrate` is the exception: hydration happens by *reading* the file,
+/// `status`/`evict`/`pin`/`unpin`/`pending` are lines the daemon answers — the
+/// paths are relative to the sync root, which is where the daemon resolves and
+/// confines them (`pending <dir>` lists the dehydrated files under a directory,
+/// which a caller then hydrates one at a time). `hydrate` is the exception:
+/// hydration happens by *reading* the file,
 /// and that read must run in a process that is neither the daemon (which serves
 /// the bytes) nor the helper (which answers the pre-content event) — §6a-ter. So
 /// it never becomes a daemon line; this process does the read itself, and takes
@@ -37,7 +40,9 @@ fn parse(positional: &[String]) -> Action {
         [verb, path] if verb == "evict" && !path.is_empty() => {
             Action::Forward(format!("evict {path}"))
         }
-        [verb, path] if (verb == "pin" || verb == "unpin") && !path.is_empty() => {
+        [verb, path]
+            if (verb == "pin" || verb == "unpin" || verb == "pending") && !path.is_empty() =>
+        {
             Action::Forward(format!("{verb} {path}"))
         }
         [verb, path] if verb == "hydrate" && !path.is_empty() => Action::Hydrate(path.clone()),
@@ -161,6 +166,11 @@ mod tests {
         assert_eq!(
             parse(&v(&["evict", "a/b.bin"])),
             Action::Forward("evict a/b.bin".to_owned())
+        );
+        // `pending` forwards too — it is a daemon-answered query, not a local read.
+        assert_eq!(
+            parse(&v(&["pending", "Photos"])),
+            Action::Forward("pending Photos".to_owned())
         );
     }
 

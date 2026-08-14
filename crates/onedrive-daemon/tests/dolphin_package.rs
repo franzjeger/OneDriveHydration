@@ -235,6 +235,41 @@ fn the_keep_on_device_wrapper_never_opens_the_file() {
 }
 
 #[test]
+fn the_installer_makes_the_servicemenu_executable() {
+    // Plasma 6 answers "You are not authorized to execute this file" when a
+    // servicemenu action is clicked and the .desktop it lives in is not itself
+    // executable — the entry appears, then cannot run. Measured on plasmashell
+    // 6.7.4. So the installer must chmod the menu file, not only the wrappers it
+    // points at.
+    let install = read("install-servicemenu.sh");
+    assert!(
+        install.contains("chmod 755 \"$menu_dir/onedrive-hydration.desktop.tmp\""),
+        "the installer must make the servicemenu .desktop executable, not only the wrappers"
+    );
+}
+
+#[test]
+fn the_keep_on_device_wrapper_expands_a_directory_via_pending() {
+    let wrapper = read("keep-on-device.sh.in");
+    // A directory is special-cased: pinned as one mark, then its dehydrated
+    // files are listed by the daemon's `pending` and hydrated one at a time.
+    assert!(
+        wrapper.contains("[ -d \"$abs\" ]"),
+        "the wrapper must special-case a directory"
+    );
+    assert!(
+        wrapper.contains("\"$CTL\" pending"),
+        "the wrapper must ask the daemon to enumerate a directory, not walk it in shell"
+    );
+    // The listing is consumed by a here-doc, not a pipe: `pending | while` would
+    // run the loop in a subshell and drop the accumulated byte total.
+    assert!(
+        !wrapper.contains("| while"),
+        "a pipe into while runs in a subshell and would lose the running totals"
+    );
+}
+
+#[test]
 fn the_installer_script_refuses_before_it_generates() {
     let install = read("install-servicemenu.sh");
     // Each of these is baked into a generated file that nothing validates
