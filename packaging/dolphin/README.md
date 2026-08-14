@@ -1,11 +1,21 @@
-# The Dolphin action
+# The Dolphin actions
 
-"Free Up Space" in Dolphin's context menu: evict the selected files back to
-placeholders. Shipped as data — a KIO servicemenu `.desktop` and a POSIX shell
-wrapper — for the same reason the tray is a StatusNotifierItem and the flyout
-is QML: the file manager already knows how to draw a menu, and a toolkit would
-buy nothing. Zero new Rust dependencies; `cargo deny check` sees an unchanged
-graph.
+Two inverse context-menu actions on the selected files: **Free Up Space**
+evicts them back to placeholders, and **Keep on Device** pins them so eviction
+skips them and pulls their content down now. Shipped as data — one KIO
+servicemenu `.desktop` and a POSIX shell wrapper per action — for the same
+reason the tray is a StatusNotifierItem and the flyout is QML: the file manager
+already knows how to draw a menu, and a toolkit would buy nothing. Zero new Rust
+dependencies; `cargo deny check` sees an unchanged graph.
+
+Both are file-only, sharing the one measured `all/allfiles` matching. Keep on
+Device works on a file by `pin`-ning it and then asking `onedrive-hydrationctl
+hydrate` to read it down; the wrapper never opens the file itself, so the read
+that hydrates stays in the one process that is neither the daemon nor the helper
+(§6a-ter). A directory pin — which the daemon and the `pin` verb already
+support — and folder-recursive hydration are a deliberate follow-up: the first
+needs `inode/directory` matching that `probes/servicemenu-match.cpp` has not yet
+measured, the second an enumeration verb that is not built.
 
 Install per user, after `../icons/install-icons.sh`:
 
@@ -25,8 +35,9 @@ It writes two files under `$XDG_DATA_HOME` (default `~/.local/share`):
 
 | | |
 |---|---|
-| `kio/servicemenus/onedrive-hydration.desktop` | the menu entry |
-| `onedrive-hydration/free-up-space.sh` | the wrapper it runs |
+| `kio/servicemenus/onedrive-hydration.desktop` | the menu entry (both actions) |
+| `onedrive-hydration/free-up-space.sh` | the Free Up Space wrapper |
+| `onedrive-hydration/keep-on-device.sh` | the Keep on Device wrapper |
 
 ## Measured on this KIO build, not taken from documentation
 
@@ -77,9 +88,15 @@ workspace, and a `.so` installed as root) rather than more of the same work.
 `docs/DOLPHIN-GROUNDWORK.md` records what it would need, including the per-file
 xattrs that are already on disk and the `st_blocks` trap it must not fall into.
 
-**A folder action.** `evict` takes one file. Recursing in shell would be
-inventing a bulk operation the daemon does not offer, with none of the
-daemon's judgment about what is safe to evict.
+**A folder action, for now.** Both entries are file-only. Free Up Space stays
+that way on purpose — recursing in shell would invent a bulk evict the daemon
+does not offer, with none of its judgment about what is safe. Keep on Device
+*could* grow one, since a directory pin is one `setxattr` the daemon already
+does and hydration is safe to recurse; but it needs `inode/directory` servicemenu
+matching (unmeasured on this KIO build) and a content-free enumeration verb to
+list what to pull down. Both are enumerated in `HydrationAPI`'s
+`docs/KEEP-ON-DEVICE-GROUNDWORK.md` (§3) and left to a follow-up rather than
+shipped as an unverified claim or a shell tree-walk.
 
 **Anything to do with `/usr/lib/qt6/plugins/kf6/overlayicon/onedrive-overlay.so`.**
 An unpackaged overlay plugin from the donor client may still be installed

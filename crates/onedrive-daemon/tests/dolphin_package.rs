@@ -143,6 +143,98 @@ fn the_wrapper_never_opens_the_file_it_is_about_to_evict() {
 }
 
 #[test]
+fn the_keep_on_device_action_is_present_and_file_only() {
+    let desktop = read("servicemenu.desktop.in");
+
+    // Both actions are registered in the shared entry.
+    let actions = keyed(&desktop, "Actions=").expect("Actions= must be present");
+    assert!(
+        actions.contains("onedriveHydrationFreeUpSpace"),
+        "{actions}"
+    );
+    assert!(
+        actions.contains("onedriveHydrationKeepOnDevice"),
+        "Keep on Device is not registered: {actions}"
+    );
+
+    // Its own block: own Name, own wrapper via @ACTION2@, same %F contract.
+    let block = desktop
+        .split("[Desktop Action onedriveHydrationKeepOnDevice]")
+        .nth(1)
+        .expect("the Keep on Device action block is missing");
+    assert_eq!(keyed(block, "Name=").as_deref(), Some("Keep on Device"));
+    let exec = keyed(block, "Exec=").expect("Keep on Device needs an Exec");
+    assert!(exec.ends_with(" %F"), "{exec}");
+    assert!(
+        exec.contains("@ACTION2@"),
+        "the second wrapper path is substituted: {exec}"
+    );
+
+    // File-only: it shares the measured all/allfiles matching and makes no
+    // unverified directory claim (that needs probes/servicemenu-match.cpp on
+    // inode/directory, still unrun — see DOLPHIN-GROUNDWORK / KEEP-ON-DEVICE).
+    assert_eq!(
+        keyed(&desktop, "MimeType=").as_deref(),
+        Some("all/allfiles;")
+    );
+}
+
+#[test]
+fn the_keep_on_device_wrapper_parses_pin_and_hydrate_replies() {
+    let wrapper = read("keep-on-device.sh.in");
+
+    // `pin`'s success is the bare word the framework's control socket answers
+    // (`pinned`), and `hydrate`'s is `hydrated <n> bytes` from
+    // onedrive-hydrationctl. The wrapper has to recognise both, or it reports a
+    // kept file as a failure.
+    assert!(
+        wrapper.contains("pinned)"),
+        "the wrapper must recognise the pin verb's success reply"
+    );
+    assert!(
+        wrapper.contains("\"hydrated \"*\" bytes\""),
+        "the wrapper must recognise the hydrate verb's success reply"
+    );
+    assert!(
+        wrapper.contains("n=${reply#hydrated }"),
+        "the wrapper must strip the hydrate prefix to get the byte count"
+    );
+
+    // The same exit-status trap Free Up Space documents: a `pin` refusal is
+    // `error:` (exit 1), but a captured reply must not abort the loop.
+    assert!(
+        wrapper.contains("|| true"),
+        "the wrapper must capture the reply rather than let a failing exit \
+         status abort it"
+    );
+}
+
+#[test]
+fn the_keep_on_device_wrapper_never_opens_the_file() {
+    // The read that hydrates the file is inside onedrive-hydrationctl, invoked
+    // as a command — never a read in this shell. Same rule as Free Up Space,
+    // checked the same way: command position, not substring.
+    let wrapper = read("keep-on-device.sh.in");
+    for line in wrapper.lines() {
+        let code = line.trim_start();
+        if code.starts_with('#') {
+            continue;
+        }
+        for segment in code.split(['|', ';', '&', '(', ')', '`', '{', '}']) {
+            let segment = segment.trim_start();
+            for reader in [
+                "cat ", "head ", "tail ", "file ", "grep ", "md5sum ", "od ", "less ",
+            ] {
+                assert!(
+                    !segment.starts_with(reader),
+                    "the wrapper must not read the target's content ({reader:?}): {line}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn the_installer_script_refuses_before_it_generates() {
     let install = read("install-servicemenu.sh");
     // Each of these is baked into a generated file that nothing validates
