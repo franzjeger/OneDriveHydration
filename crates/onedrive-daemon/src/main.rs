@@ -31,6 +31,11 @@ fn value(name: &str) -> Option<String> {
     None
 }
 
+/// A presence flag with no value, e.g. `--autoevict`.
+fn flag(name: &str) -> bool {
+    std::env::args().skip(1).any(|a| a == name)
+}
+
 fn required(name: &str) -> String {
     value(name).unwrap_or_else(|| {
         eprintln!("onedrive-hydration-daemon: missing {name}");
@@ -42,7 +47,7 @@ fn usage() -> ! {
     eprintln!(
         "usage:\n  onedrive-hydration-daemon auth --state-dir <path> --client-id <uuid>\n  \
          onedrive-hydration-daemon run --mount <path> --state-dir <path> --client-id <uuid> \
-         [--socket <path>]"
+         [--socket <path>] [--autoevict]"
     );
     std::process::exit(2)
 }
@@ -205,6 +210,14 @@ fn main() -> io::Result<()> {
                     // sync folder did not reach the cloud until long after its
                     // owner had concluded the client was broken.
                     debounce: hydration_client::upload::QUIET_PERIOD,
+                    // Off unless `--autoevict` is passed: auto-freeing local
+                    // space is opt-in. When on, the framework's default
+                    // disk-pressure policy — dehydrate the least-recently-
+                    // acquired unpinned files below a low-water mark, honoring
+                    // the pin. Off is off: with `None` the framework spawns no
+                    // eviction thread at all.
+                    eviction: flag("--autoevict")
+                        .then(hydration_client::evict_policy::EvictionConfig::default_pressure),
                 },
                 access,
             )
