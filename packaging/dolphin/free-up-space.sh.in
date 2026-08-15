@@ -61,6 +61,40 @@ refresh_overlay() {
         >/dev/null 2>&1 || true
 }
 
+# A progress dialog for freeing a folder, which walks its whole subtree and can
+# take a while. Mirrors the Keep on Device wrapper exactly (see it for the design
+# notes): kdialog --progressbar driven over D-Bus, guarded so headless still runs,
+# advisory Cancel that the loop polls. $qdbus_bin and $prog_ref stay UNQUOTED on
+# purpose so "service /path" splits into the two arguments qdbus expects.
+qdbus_bin=$(command -v qdbus6 || command -v qdbus || true)
+
+progress_start() { # $1=total  $2=label
+    prog_ref=''
+    { [ -n "$qdbus_bin" ] && command -v kdialog >/dev/null 2>&1; } || return 0
+    prog_ref=$(kdialog --title "$TITLE" --progressbar "$2" "$1" 2>/dev/null) || prog_ref=''
+    [ -n "$prog_ref" ] && $qdbus_bin $prog_ref setAutoClose true >/dev/null 2>&1
+    return 0
+}
+
+progress_set() { # $1=value  $2=label
+    [ -n "${prog_ref:-}" ] || return 0
+    $qdbus_bin $prog_ref Set "" value "$1" >/dev/null 2>&1
+    $qdbus_bin $prog_ref setLabelText "$2" >/dev/null 2>&1
+    return 0
+}
+
+progress_done() {
+    [ -n "${prog_ref:-}" ] || return 0
+    $qdbus_bin $prog_ref close >/dev/null 2>&1
+    prog_ref=''
+    return 0
+}
+
+progress_cancelled() {
+    [ -n "${prog_ref:-}" ] || return 1
+    [ "$($qdbus_bin $prog_ref wasCancelled 2>/dev/null)" = "true" ]
+}
+
 # Dolphin runs this detached with no terminal, so anything printed to stdout is
 # gone. Success is a passive popup nobody has to dismiss; a refusal is modal,
 # because the whole point of quoting the daemon verbatim is that somebody reads
@@ -120,6 +154,58 @@ for f in "$@"; do
             continue
             ;;
     esac
+
+    # A folder: Free Up Space is the inverse of Keep on Device on a folder — it
+    # UN-keeps it. Unpin the folder (which clears its on-device badge in the
+    # plugin), then evict every file under it one at a time. `ctl evict <folder>`
+    # is itself NotEligible ("not a regular file"), so the subtree is walked here:
+    # `find` is a readdir and opens no content — the same care the file path takes,
+    # for the same reason — and an already-cloud file answers AlreadyDehydrated and
+    # is passed over. The listing is captured and fed by a here-doc, not a pipe, so
+    # the running `freed`/`ok` totals are not lost to a subshell; the count is pure
+    # shell for the same no-content-reader reason as Keep on Device. A progress
+    # dialog because a kept folder can be large, and each child plus the folder is
+    # refreshed so the badges clear live.
+    if [ -d "$abs" ]; then
+        "$CTL" unpin "$rel" >/dev/null 2>&1 || true
+        listing=$(find "$abs" -type f 2>/dev/null)
+        total=0
+        _oifs=$IFS
+        IFS='
+'
+        for _c in $listing; do
+            [ -n "$_c" ] && total=$((total + 1))
+        done
+        IFS=$_oifs
+        done_n=0
+        [ "$total" -gt 0 ] && progress_start "$total" "Freeing \"$(basename -- "$abs")\"…"
+        while IFS= read -r child; do
+            [ -n "$child" ] || continue
+            crel=${child#"$MOUNT"/}
+            reply=$("$CTL" evict "$crel" 2>&1) || true
+            case "$reply" in
+                "reclaimed "*" bytes")
+                    n=${reply#reclaimed }
+                    n=${n% bytes}
+                    case "$n" in
+                        '' | *[!0-9]*) n=0 ;;
+                    esac
+                    freed=$((freed + n))
+                    ok=$((ok + 1))
+                    ;;
+            esac
+            refresh_overlay "$child"
+            done_n=$((done_n + 1))
+            progress_set "$done_n" "Freeing $done_n of $total…"
+            progress_cancelled && break
+        done <<EOF
+$listing
+EOF
+        progress_done
+        # The folder is unpinned now, so its on-device badge clears too.
+        refresh_overlay "$abs"
+        continue
+    fi
 
     reply=$("$CTL" evict "$rel" 2>&1) || true
 

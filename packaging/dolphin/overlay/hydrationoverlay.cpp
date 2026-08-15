@@ -49,17 +49,25 @@ constexpr const char *kDehydratedXattr = "user.hydration.dehydrated";
 // theme (measured present in breeze and breeze-dark), so the feature draws
 // something real with no icon-install step. The pairing mirrors what a Windows
 // OneDrive user already reads at a glance: a cloud for "in the cloud, not here",
-// a green check for "on this device". Both are drawn only on FILES — never on a
-// folder, whose aggregate state one lgetxattr cannot know, and whose check was
-// the "everything is downloaded" misread an earlier cut produced.
+// a green check for "on this device".
 //
-// The history is the design: cut one badged files AND folders with a check, and
-// read as "everything downloaded"; cut two badged ONLY the cloud-only files and
-// left residents bare, and a glance could not tell "downloaded" from "unmarked
-// for some other reason". So both states now carry a distinct mark, files only.
-// A later slice can swap in branded icons; getOverlays takes any name.
+// A FILE always carries one or the other. A FOLDER carries the check only when
+// it is pinned — Kept on Device — so "sync this folder to the device" leaves a
+// visible mark and "Free Up Space" clears it; an unpinned folder draws nothing,
+// because one probe cannot know whether its whole subtree is resident, and a
+// check on EVERY (mostly-cloud) folder was the "everything is downloaded" misread
+// an earlier cut produced.
+//
+// The history is the design: cut one badged files AND every folder with a check,
+// and read as "everything downloaded"; cut two badged only cloud-only files and
+// left residents bare, so a glance could not tell "downloaded" from "unmarked".
+// So both states carry a distinct mark, and a folder is marked only when the user
+// pinned it. A later slice can swap in branded icons; getOverlays takes any name.
 constexpr const char *kCloudOnlyEmblem = "cloud-download"; // a cloud: not here yet
 constexpr const char *kOnDeviceEmblem = "emblem-success";  // green check: on device
+// The pin Keep on Device sets on a folder (and Free Up Space clears). Same
+// namespace as the dehydrated mark; a presence probe, never a value read.
+constexpr const char *kPinnedXattr = "user.hydration.pinned";
 
 // Where the sync roots are listed, one absolute path per line, written by
 // install-overlay.sh. The plugin only badges files under a configured root, so
@@ -150,14 +158,24 @@ private:
             return {QString::fromLatin1(kCloudOnlyEmblem)};
 
         // No mark: a resident file, OR a directory, OR something with no xattrs /
-        // raced away (ENOTSUP/ENOENT). Only a resident regular FILE gets the
-        // on-device check — a directory never does, because one lgetxattr cannot
-        // tell whether its subtree is all here, and a check on every folder is
-        // exactly the "everything is downloaded" misread. lstat draws the line;
-        // anything that is not a regular file draws nothing.
+        // raced away (ENOTSUP/ENOENT). lstat draws the lines below; a failed stat
+        // (raced deletion) draws nothing.
         struct stat st;
-        if (lstat(local.constData(), &st) == 0 && S_ISREG(st.st_mode))
+        if (lstat(local.constData(), &st) != 0)
+            return {};
+
+        // A resident regular FILE gets the on-device check.
+        if (S_ISREG(st.st_mode))
             return {QString::fromLatin1(kOnDeviceEmblem)};
+
+        // A FOLDER gets it only when pinned — Kept on Device. That is the one
+        // folder state a single probe can know for sure, and it is exactly the
+        // "I synced this folder to the device" the check is meant to confirm. An
+        // unpinned folder draws nothing (its subtree residency is unknown, and a
+        // check on every folder is the "everything is downloaded" misread).
+        if (S_ISDIR(st.st_mode) && lgetxattr(local.constData(), kPinnedXattr, nullptr, 0) >= 0)
+            return {QString::fromLatin1(kOnDeviceEmblem)};
+
         return {};
     }
 

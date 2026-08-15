@@ -263,8 +263,11 @@ for f in "$@"; do
 $listing
 EOF
         progress_done
-        # A pinned folder is itself resident (a directory), so it never carries a
-        # cloud emblem; its children's emblems are what changed, refreshed above.
+        # The folder itself now carries the on-device check — it is pinned, and
+        # the overlay plugin badges a pinned folder — so refresh it too, not only
+        # its children. That check is the visible confirmation that "Keep on
+        # Device" ran on the whole folder, the thing that was missing before.
+        refresh_overlay "$abs"
         continue
     fi
 
