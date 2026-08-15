@@ -106,9 +106,18 @@ fn the_plugin_installs_into_the_kf6_overlay_namespace() {
         "the plugin must link the KIO core that defines KOverlayIconPlugin"
     );
     let install = read("install-overlay.sh");
+    // Install to where Qt ACTUALLY searches, not the KDE cmake convention: on a
+    // CachyOS/Arch desktop `cmake --install`'s KDE_INSTALL_PLUGINDIR was
+    // /usr/lib/plugins while Qt6 searches /usr/lib/qt6/plugins, so the emblems
+    // silently never loaded. The installer asks Qt for its plugin dir and
+    // installs the .so into that kf6/overlayicon namespace directly.
     assert!(
-        install.contains("cmake --install"),
-        "the installer must install the built plugin system-wide"
+        install.contains("qtpaths6 --plugin-dir") || install.contains("QT_INSTALL_PLUGINS"),
+        "the installer must ask Qt where its plugins go, not assume the KDE dir"
+    );
+    assert!(
+        install.contains("kf6/overlayicon/onedrive-hydration-overlay.so"),
+        "the installer must place the .so in Qt's kf6/overlayicon namespace"
     );
 }
 

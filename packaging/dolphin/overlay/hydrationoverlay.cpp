@@ -44,20 +44,19 @@ namespace
 // packaging test dolphin_overlay_package.rs fails if the two ever drift.
 constexpr const char *kDehydratedXattr = "user.hydration.dehydrated";
 
-// Breeze built-in emblem names, resolved through the desktop icon theme. Chosen
-// over branded art for this first cut precisely because they ship with every KF6
-// desktop (measured present in breeze and breeze-dark), so the feature draws
-// something real with no icon-install step. A later slice can swap in branded
-// onedrive-cloud / onedrive-synced emblems; getOverlays takes any icon name, so
-// that is a one-line change here.
+// The cloud-only emblem, a Breeze built-in resolved through the desktop icon
+// theme — it ships with every KF6 desktop (measured present in breeze and
+// breeze-dark), so the feature draws something real with no icon-install step. A
+// later slice can swap in a branded onedrive-cloud; getOverlays takes any icon
+// name, so that is a one-line change. There is deliberately no resident emblem:
+// a check on every on-device file (and every folder) is noise that reads as
+// "everything is downloaded" — only the not-here files are marked.
 constexpr const char *kCloudOnlyEmblem = "vcs-update-required"; // placeholder
-constexpr const char *kResidentEmblem = "vcs-normal";          // on device
 
 // Where the sync roots are listed, one absolute path per line, written by
-// install-overlay.sh. Without it the plugin badges nothing: a resident file
-// carries no mark, so the only way to tell "an on-device file in the sync
-// folder" from "any other file on the system" is to know the roots. This is
-// what keeps the check emblem off every unrelated file on the machine.
+// install-overlay.sh. The plugin only badges files under a configured root, so
+// a cloud-only placeholder anywhere else on the system (another sync client's,
+// say) is left alone — the roots are what scope the emblem to this OneDrive.
 QString rootsConfigPath()
 {
     const QString base = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
@@ -114,15 +113,17 @@ private:
     // is fetched — presence is the whole signal.
     static QStringList probe(const QByteArray &local)
     {
+        // Only a cloud-only placeholder gets an emblem — a cloud saying "not on
+        // this device yet". Everything else draws NOTHING: a resident file, and
+        // (crucially) a directory, both answer ENODATA, and marking every local
+        // file and every folder with a check reads as "everything is downloaded"
+        // — the wrong signal in a tree that is mostly placeholders. The useful
+        // mark is the one on what is NOT here, so that is the only one drawn.
+        // ENOTSUP (no xattrs), ENOENT (raced deletion): also nothing.
         const ssize_t r = lgetxattr(local.constData(), kDehydratedXattr, nullptr, 0);
         if (r >= 0)
-            return {QString::fromLatin1(kCloudOnlyEmblem)}; // mark present -> cloud-only
-        // ENODATA/ENOATTR (resident), ENOTSUP (fs without xattrs -> no
-        // placeholders possible), ENOENT (raced deletion): all "on device or
-        // gone". Only draw the check for a file that is actually there.
-        if (errno == ENOENT)
-            return {};
-        return {QString::fromLatin1(kResidentEmblem)};
+            return {QString::fromLatin1(kCloudOnlyEmblem)}; // cloud-only placeholder
+        return {};
     }
 
     void deliver(const QString &path, const QStringList &overlays)
