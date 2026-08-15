@@ -25,6 +25,41 @@ files_word() {
     if [ "$1" -eq 1 ]; then printf 'file'; else printf 'files'; fi
 }
 
+# Percent-encode a path for a file:// URL. LC_ALL=C so `?` matches one BYTE, and
+# every non-unreserved byte is encoded — correct for UTF-8 filenames (each byte
+# becomes %XX), which a naive space-only replace would corrupt.
+urlencode() {
+    _s=$1
+    _o=''
+    _old=${LC_ALL:-}
+    LC_ALL=C
+    while [ -n "$_s" ]; do
+        _c=${_s%"${_s#?}"}
+        case $_c in
+            [a-zA-Z0-9._~/-]) _o="$_o$_c" ;;
+            *) _o="$_o$(printf '%%%02X' "'$_c")" ;;
+        esac
+        _s=${_s#?}
+    done
+    LC_ALL=$_old
+    printf '%s' "$_o"
+}
+
+# After a file's residency changes, send the standard KIO signal that a file
+# changed, org.kde.KDirNotify.FilesChanged, so open views (Dolphin) re-query the
+# item. Because the plugin does not cache, any re-query returns the fresh state,
+# so a fresh listing always draws the right badge. Whether an ALREADY-open view
+# repaints the badge without a manual reload — especially after eviction, where
+# size and mtime barely move and KIO may skip the re-query — is the refresh
+# question docs/DOWNLOAD-VISIBILITY-GROUNDWORK.md leaves to P3 and this has not
+# measured; the signal is the right nudge to send regardless.
+refresh_overlay() {
+    command -v dbus-send >/dev/null 2>&1 || return 0
+    dbus-send --session --type=signal /org/kde/KDirNotify \
+        org.kde.KDirNotify.FilesChanged "array:string:file://$(urlencode "$1")" \
+        >/dev/null 2>&1 || true
+}
+
 # Dolphin runs this detached with no terminal, so anything printed to stdout is
 # gone. Success is a passive popup nobody has to dismiss; a refusal is modal,
 # because the whole point of quoting the daemon verbatim is that somebody reads
@@ -96,6 +131,16 @@ for f in "$@"; do
     # verbatim and names the folder to free instead. The `via` path the daemon
     # reports is read from the reply string, never from the file — no content is
     # opened here.
+    #
+    # That reply is a Rust `Debug` rendering (`Pinned { via: "<path>" }`), so the
+    # byte-for-byte `via = abs` test below is exact only for a path free of the
+    # characters Debug escapes — a `"`, a `\`, or a control code, which would be
+    # captured with their backslash and never match the raw readlink path.
+    # OneDrive and SharePoint forbid all three in item names, so a real placeholder
+    # never carries them; a provider that allowed them would have to un-escape the
+    # capture (or, better, report `via` in a machine-parseable unescaped form)
+    # before comparing. The failure is safe either way: a missed match just leaves
+    # the file kept and shows the refusal, it never frees the wrong file.
     case "$reply" in
         *'Pinned { via:'*)
             via=$(printf '%s' "$reply" | sed -n 's/.*via: "\(.*\)".*/\1/p')
@@ -130,6 +175,10 @@ for f in "$@"; do
 "
             ;;
     esac
+
+    # Whatever the outcome, the file's residency may have moved (freed -> cloud,
+    # or unpinned): re-query its overlay so Dolphin's emblem is not left stale.
+    refresh_overlay "$abs"
 done
 
 if [ -z "$problems" ]; then

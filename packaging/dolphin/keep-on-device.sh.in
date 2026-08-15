@@ -30,6 +30,39 @@ items_word() {
     if [ "$1" -eq 1 ]; then printf 'item'; else printf 'items'; fi
 }
 
+# Percent-encode a path for a file:// URL. LC_ALL=C so `?` matches one BYTE, and
+# every non-unreserved byte is encoded — correct for UTF-8 filenames.
+urlencode() {
+    _s=$1
+    _o=''
+    _old=${LC_ALL:-}
+    LC_ALL=C
+    while [ -n "$_s" ]; do
+        _c=${_s%"${_s#?}"}
+        case $_c in
+            [a-zA-Z0-9._~/-]) _o="$_o$_c" ;;
+            *) _o="$_o$(printf '%%%02X' "'$_c")" ;;
+        esac
+        _s=${_s#?}
+    done
+    LC_ALL=$_old
+    printf '%s' "$_o"
+}
+
+# After a file is hydrated its residency moved (cloud-only -> on device), so its
+# emblem must be re-queried or Dolphin leaves the old one. Send the standard
+# org.kde.KDirNotify.FilesChanged; because the plugin does not cache, any re-query
+# returns the fresh state. Hydration changes size and mtime, so an open view is
+# far likelier to repaint here than on eviction, but the exact already-open
+# refresh path is still the unmeasured P3 question — a fresh listing always shows
+# it correctly.
+refresh_overlay() {
+    command -v dbus-send >/dev/null 2>&1 || return 0
+    dbus-send --session --type=signal /org/kde/KDirNotify \
+        org.kde.KDirNotify.FilesChanged "array:string:file://$(urlencode "$1")" \
+        >/dev/null 2>&1 || true
+}
+
 # The download half of the result line: how many files came down, or that
 # there was nothing to pull. Kept separate so "kept N on device" never implies
 # a download that did not happen (the 0B-pulled confusion).
@@ -157,9 +190,12 @@ for f in "$@"; do
 "
                     ;;
             esac
+            refresh_overlay "$MOUNT/$childrel"
         done <<EOF
 $listing
 EOF
+        # A pinned folder is itself resident (a directory), so it never carries a
+        # cloud emblem; its children's emblems are what changed, refreshed above.
         continue
     fi
 
@@ -184,6 +220,9 @@ EOF
 "
             ;;
     esac
+    # The file's residency moved (cloud-only -> on device), so its emblem is
+    # re-queried and the cloud badge clears.
+    refresh_overlay "$abs"
 done
 
 if [ -z "$problems" ]; then
