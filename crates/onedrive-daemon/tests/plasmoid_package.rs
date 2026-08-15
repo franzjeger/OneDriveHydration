@@ -37,6 +37,7 @@ fn state(daemon_running: bool, unsent: u64, excluded: u64, exposures: u64) -> Da
         unsent,
         excluded,
         exposures,
+        downloading: 0,
     }
 }
 
@@ -97,6 +98,13 @@ fn the_flyout_dials_the_surface_this_crate_serves() {
         "the flyout must subscribe to CredentialStateChanged, not poll"
     );
     assert!(qml.contains("properties.CredentialState"));
+    // The in-flight download count travels on its own member the same way, and
+    // its property is part of the cold read.
+    assert!(
+        qml.contains("function dbusDownloadChanged("),
+        "the flyout must subscribe to DownloadChanged, not poll"
+    );
+    assert!(qml.contains("properties.Downloading"));
     // The documented complement to the signal: one cold read of all the
     // properties when the service (re)appears.
     assert!(qml.contains("\"GetAll\""));

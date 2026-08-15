@@ -139,6 +139,7 @@ impl StateService {
                 unsent,
                 excluded,
                 exposures,
+                downloading: 0,
             },
         )
         .unwrap();

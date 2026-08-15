@@ -789,6 +789,12 @@ fn read_service_state(connection: &zbus::blocking::Connection) -> Option<DaemonS
         unsent: proxy.get_property::<u64>("Unsent").ok()?,
         excluded: proxy.get_property::<u64>("Excluded").ok()?,
         exposures: proxy.get_property::<u64>("Exposures").ok()?,
+        // The tray icon does not distinguish a downloading state — that count is
+        // the plasmoid's "Downloading N" row, read there straight off the
+        // Downloading property. Left zero here rather than read with `?`, which
+        // would make the whole cold read fail against a daemon too old to have
+        // the property.
+        downloading: 0,
     })
 }
 
@@ -924,6 +930,9 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
                         unsent,
                         excluded,
                         exposures,
+                        // StateChanged does not carry downloading (it rides its
+                        // own DownloadChanged signal); the tray does not show it.
+                        downloading: 0,
                     }))
                     .is_err()
                 {
@@ -1065,6 +1074,7 @@ mod tests {
             unsent,
             excluded,
             exposures,
+            downloading: 0,
         }
     }
 

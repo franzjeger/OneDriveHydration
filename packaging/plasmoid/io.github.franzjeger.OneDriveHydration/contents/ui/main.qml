@@ -64,6 +64,10 @@ PlasmoidItem {
     property double unsent: 0
     property double excluded: 0
     property double exposures: 0
+    // Fetches the client is serving right now, from the Downloading property and
+    // the DownloadChanged signal. A live number (0 or 1 today), not held stale
+    // like the counters above: it is only shown while it is above zero.
+    property double downloading: 0
 
     // The daemon's sign-in conclusion, from the CredentialState property and
     // the CredentialStateChanged signal. "unknown" until a running daemon
@@ -90,6 +94,7 @@ PlasmoidItem {
     // carries, nor the other way round.
     property int stateGeneration: 0
     property int credentialGeneration: 0
+    property int downloadGeneration: 0
 
     // The sync root. The daemon knows its mount but the D-Bus surface does
     // not expose it, so like the tray (which is told with --mount) the
@@ -271,6 +276,14 @@ PlasmoidItem {
         root.credentialState = root.credentialWord(value);
     }
 
+    // The download count travels on its own signal, so it carries its own
+    // generation the way the credential does — a DownloadChanged that lands
+    // while a cold GetAll is in flight must win over the older read.
+    function applyDownloading(value) {
+        root.downloadGeneration += 1;
+        root.downloading = root.u64(value);
+    }
+
     // The one cold read. Each half is applied only if no signal of its kind
     // arrived while the read was in flight: a signal always carries newer
     // knowledge than a read issued before it, and the service emits each
@@ -279,6 +292,7 @@ PlasmoidItem {
     function readAll() {
         const stateGeneration = root.stateGeneration;
         const credentialGeneration = root.credentialGeneration;
+        const downloadGeneration = root.downloadGeneration;
         DBus.SessionBus.asyncCall({
             service: root.busName,
             path: root.objectPath,
@@ -296,6 +310,11 @@ PlasmoidItem {
             }
             if (credentialGeneration === root.credentialGeneration) {
                 root.applyCredential(properties.CredentialState);
+            }
+            // Downloading may be undefined against a service too old to expose
+            // it; u64(undefined) is 0, which is the right "not downloading".
+            if (downloadGeneration === root.downloadGeneration) {
+                root.applyDownloading(properties.Downloading);
             }
         }, error => {
             // The service raced away between appearing and answering; the
@@ -395,6 +414,13 @@ PlasmoidItem {
         // a newer service.
         function dbusCredentialStateChanged(state) {
             root.applyCredential(state);
+        }
+
+        // The in-flight download count, on its own member for the same reason:
+        // a member with no matching function here is simply not dispatched, so
+        // an older flyout ignores it and a newer one shows it.
+        function dbusDownloadChanged(downloading) {
+            root.applyDownloading(downloading);
         }
     }
 

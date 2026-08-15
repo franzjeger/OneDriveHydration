@@ -22,10 +22,12 @@
 //! immediately, another per change, no line when nothing changed, nothing
 //! else ever. Every line is republished as D-Bus property values plus a
 //! signal: `StateChanged` for the counters, `CredentialStateChanged` for the
-//! sign-in. Two signals rather than one grown signal, because the tray
-//! deserializes `StateChanged` with a fixed `(bool,u64,u64,u64)` signature
-//! and silently drops anything shaped differently — the wire contract is
-//! additive only for *new members*, never for new arguments on old ones.
+//! sign-in, `DownloadChanged` for the in-flight download count. Separate
+//! signals rather than one grown signal, because the tray deserializes
+//! `StateChanged` with a fixed `(bool,u64,u64,u64)` signature and silently
+//! drops anything shaped differently — the wire contract is additive only for
+//! *new members* (a new property and its own signal), never for new arguments
+//! on old ones.
 //! However many trays and flyouts subscribe here, each daemon socket sees
 //! exactly one watcher — this service — out of the small number it caps
 //! watchers at; the connections are held even while nobody is subscribed,
@@ -82,6 +84,10 @@ pub struct DaemonState {
     pub excluded: u64,
     /// Other mounts that expose the sync root's files without hydration.
     pub exposures: u64,
+    /// Fetches the client is serving right now — what a tray shows as
+    /// "downloading N". Live, not walk-derived; 0 or 1 today, since the client
+    /// serves one fetch at a time.
+    pub downloading: u64,
 }
 
 /// Fold one `watch` state line into `state`. Returns whether the line carried
@@ -106,6 +112,7 @@ pub fn apply_state_line(line: &str, state: &mut DaemonState) -> bool {
             "unsent" => state.unsent = value,
             "excluded" => state.excluded = value,
             "exposures" => state.exposures = value,
+            "downloading" => state.downloading = value,
             _ => continue,
         }
         recognized = true;
@@ -450,6 +457,13 @@ impl ControlSurface {
         self.state.exposures
     }
 
+    /// Fetches the client is serving right now — a tray's "downloading N".
+    /// 0 or 1 today, since the client serves one fetch at a time.
+    #[zbus(property)]
+    fn downloading(&self) -> u64 {
+        self.state.downloading
+    }
+
     /// The daemon's sign-in conclusion: `"healthy"`, `"unsaved"` (signed in
     /// and syncing, but the rotated credential cannot be written to Secret
     /// Service), `"rejected"` (the service has conclusively refused the
@@ -530,6 +544,20 @@ impl ControlSurface {
     /// `credential_state_changed` emitter for `PropertiesChanged`.)
     #[zbus(signal, name = "CredentialStateChanged")]
     pub async fn credential_changed(emitter: &SignalEmitter<'_>, state: &str) -> zbus::Result<()>;
+
+    /// Fired when the number of in-flight downloads changes, carrying it, so a
+    /// subscriber never needs a follow-up read. A new signal rather than a
+    /// fifth argument on `StateChanged`, for the same reason
+    /// `CredentialStateChanged` is separate: existing subscribers deserialize
+    /// `StateChanged` by its exact `(bool,u64,u64,u64)` signature and would
+    /// silently drop a grown one. (The Rust name differs from the wire name
+    /// because the `downloading` property already generates a
+    /// `downloading_changed` emitter for `PropertiesChanged`.)
+    #[zbus(signal, name = "DownloadChanged")]
+    pub async fn download_changed(
+        emitter: &SignalEmitter<'_>,
+        downloading: u64,
+    ) -> zbus::Result<()>;
 }
 
 /// Push a new state into a served [`ControlSurface`]: update the properties,
@@ -580,6 +608,14 @@ pub fn publish_state(
         if previous.exposures != state.exposures {
             surface.exposures_changed(emitter).await?;
         }
+        if previous.downloading != state.downloading {
+            surface.downloading_changed(emitter).await?;
+        }
+        // StateChanged keeps its pinned (bool,u64,u64,u64) shape and fires once
+        // per distinct state, as before — downloading is deliberately not one of
+        // its arguments. It rides its own DownloadChanged instead, emitted only
+        // when it actually moved, so a state that differs only in an unsent count
+        // does not also flap the download signal.
         ControlSurface::state_changed(
             emitter,
             state.daemon_running,
@@ -587,7 +623,11 @@ pub fn publish_state(
             state.excluded,
             state.exposures,
         )
-        .await
+        .await?;
+        if previous.downloading != state.downloading {
+            ControlSurface::download_changed(emitter, state.downloading).await?;
+        }
+        Ok(())
     })
 }
 
@@ -601,7 +641,7 @@ mod tests {
     fn state_line_updates_only_the_keys_it_names() {
         let mut state = DaemonState::default();
         assert!(apply_state_line(
-            "unsent=3 excluded=10 exposures=1",
+            "unsent=3 excluded=10 exposures=1 downloading=1",
             &mut state
         ));
         assert_eq!(
@@ -611,6 +651,7 @@ mod tests {
                 unsent: 3,
                 excluded: 10,
                 exposures: 1,
+                downloading: 1,
             }
         );
         // A later line may carry fewer keys; the missing ones keep their
@@ -716,6 +757,9 @@ mod tests {
             unsent,
             excluded,
             exposures,
+            // None of the daemon lines above carry `downloading`, so every
+            // published state keeps the default zero.
+            downloading: 0,
         };
         assert_eq!(
             published,
