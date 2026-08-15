@@ -1,0 +1,9 @@
+{
+    "KPlugin": {
+        "Name": "OneDrive Hydration Overlay",
+        "Description": "Draws on-device / cloud-only emblems on files in the OneDrive sync folder",
+        "Icon": "onedrive-hydration",
+        "License": "MIT OR Apache-2.0",
+        "Version": "0.1"
+    }
+}
