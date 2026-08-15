@@ -102,25 +102,33 @@ if [ -z "$so" ] || [ ! -f "$so" ]; then
 fi
 printf 'built: %s\n' "$so"
 
-# Install system-wide. `cmake --install` honours CMAKE_INSTALL_PREFIX=/usr and
-# KDE_INSTALL_PLUGINDIR, so the .so lands in the same kf6/overlayicon dir Dolphin
-# searches. Needs root; run under sudo only if we are not already root.
+# Install the built .so where Qt ACTUALLY searches for plugins — not where the
+# KDE cmake convention (KDE_INSTALL_PLUGINDIR, what `cmake --install` uses) would
+# put it. On most distros the two agree, but not everywhere: measured on a
+# CachyOS/Arch desktop, KDEInstallDirs resolves to /usr/lib/plugins while Qt6
+# searches /usr/lib/qt6/plugins (`qtpaths6 --plugin-dir`). `cmake --install`
+# there lands the .so in a directory Dolphin never looks in, and the emblems
+# silently never appear — the plugin loads nowhere and nothing says so. So ask
+# Qt where its plugins live and install into its kf6/overlayicon namespace.
+plugin_dir=$(qtpaths6 --plugin-dir 2>/dev/null \
+    || qmake6 -query QT_INSTALL_PLUGINS 2>/dev/null \
+    || printf '/usr/lib/qt6/plugins')
+dest="$plugin_dir/kf6/overlayicon/onedrive-hydration-overlay.so"
 sudo=
 if [ "$(id -u)" -ne 0 ]; then
     if command -v sudo >/dev/null 2>&1; then
         sudo=sudo
-        printf 'installing system-wide (needs root)...\n'
+        printf 'installing system-wide (needs root): %s\n' "$dest"
     else
         printf 'refused: the plugin must be installed to the system Qt plugin dir,\n' >&2
         printf 'which needs root, and sudo is not available. Re-run this script as root.\n' >&2
         exit 1
     fi
 fi
-$sudo cmake --install "$build_dir" >"$build_dir/install.log" 2>&1 || {
-    printf 'refused: install failed. cmake said:\n' >&2
-    sed 's/^/  /' "$build_dir/install.log" >&2
+if ! $sudo install -D -m 755 "$so" "$dest"; then
+    printf 'refused: could not install the plugin to %s\n' "$dest" >&2
     exit 1
-}
+fi
 
 # The roots config: user scope, one absolute path per line, read by the plugin
 # at startup. Without it a resident file — which carries no mark — is
