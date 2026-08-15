@@ -139,3 +139,34 @@ jobs:
       - run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # The one compiled non-Rust artifact: the Dolphin overlay plugin
+  # (packaging/dolphin/overlay/). cargo never sees it, so without this job a
+  # change that breaks it against KF6 lands unnoticed. This is the second
+  # toolchain the overlay always cost — Qt6 + KF6 + ECM on top of Rust — and
+  # `cargo test`'s dolphin_overlay_package.rs still pins the source-level
+  # contracts (the xattr it probes, that it reads no content); this pins that
+  # the source actually compiles and links a MODULE .so against a real KF6.
+  overlay-plugin:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install the KF6 build toolchain
+        # If any of these is not in the runner's repos, this step fails loudly
+        # rather than silently skipping the build — the toolchain's availability
+        # is itself something this job is here to keep honest.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            cmake extra-cmake-modules qt6-base-dev libkf6kio-dev
+      - name: Configure and build the overlay plugin
+        run: |
+          cmake -S packaging/dolphin/overlay -B build/overlay \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/overlay
+      - name: A MODULE .so was produced (not a static .a fallback)
+        run: |
+          so=$(find build/overlay -name 'onedrive-hydration-overlay.so' | head -n1)
+          test -n "$so" || { echo "no plugin .so was built"; find build/overlay -name '*.so' -o -name '*.a'; exit 1; }
+          file "$so" | grep -q 'shared object'
+          echo "built $so"
