@@ -26,7 +26,11 @@ endif()
 
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Core)
+# Core for the plugin itself; DBus so the plugin can listen for the servicemenu
+# wrappers' org.kde.KDirNotify.FilesChanged and PUSH a fresh overlay via
+# overlaysChanged. That push is the only refresh that survives an eviction: KIO's
+# own stat-keyed refresh skips a file whose size and mtime did not move.
+find_package(Qt6 REQUIRED COMPONENTS Core DBus)
 find_package(KF6 REQUIRED COMPONENTS KIO)
 
 # kcoreaddons_add_plugin builds the MODULE .so and installs it into
@@ -36,4 +40,4 @@ find_package(KF6 REQUIRED COMPONENTS KIO)
 kcoreaddons_add_plugin(onedrive-hydration-overlay
     SOURCES hydrationoverlay.cpp
     INSTALL_NAMESPACE "kf6/overlayicon")
-target_link_libraries(onedrive-hydration-overlay KF6::KIOCore)
+target_link_libraries(onedrive-hydration-overlay KF6::KIOCore Qt6::DBus)

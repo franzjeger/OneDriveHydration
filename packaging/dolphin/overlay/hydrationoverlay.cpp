@@ -3,15 +3,16 @@
 // tray shows in aggregate — which files hold their content locally, and which
 // are placeholders the cloud still owns.
 //
-// The whole answer for one file is a single presence probe of the framework's
-// dehydrated mark (see below). That read is metadata, not content: it fires no
-// fanotify pre-content event and cannot hydrate the file it is drawing a badge
-// for. Measured on a real mount under a live mark, on btrfs, ext4, and xfs, by
-// HydrationAPI's probes/xattrread.c — zero events, every time. This is the load
-// bearing safety property: a status UI that read *content* would hydrate every
-// one of ~166k placeholders the moment the user opened a folder, or deadlock
-// against the very event it triggered (HydrationAPI DESIGN.md 6a-ter). This
-// plugin only ever issues lgetxattr, never open()/read()/mmap.
+// The answer for one file is a presence probe of the framework's dehydrated
+// mark, and for an unmarked file one lstat to tell a resident file from a folder
+// (see below). Both are metadata, not content: they fire no fanotify pre-content
+// event and cannot hydrate the file being badged. Measured on a real mount under
+// a live mark, on btrfs, ext4, and xfs, by HydrationAPI's probes/xattrread.c —
+// zero events, every time. This is the load-bearing safety property: a status UI
+// that read *content* would hydrate every one of ~166k placeholders the moment
+// the user opened a folder, or deadlock against the very event it triggered
+// (HydrationAPI DESIGN.md 6a-ter). This plugin only ever issues lgetxattr and
+// lstat, never open()/read()/mmap.
 //
 // KOverlayIconPlugin (KIO) is the mechanism KDE file managers use for
 // third-party overlay emblems, and the one Nextcloud's current Dolphin
@@ -26,12 +27,14 @@
 // cache went on returning the stale answer Dolphin drew before the change.
 #include <KOverlayIconPlugin>
 
+#include <QDBusConnection>
 #include <QFile>
 #include <QStandardPaths>
 #include <QStringList>
 #include <QTextStream>
 #include <QUrl>
 
+#include <sys/stat.h>
 #include <sys/xattr.h>
 #include <cerrno>
 
@@ -42,14 +45,21 @@ namespace
 // packaging test dolphin_overlay_package.rs fails if the two ever drift.
 constexpr const char *kDehydratedXattr = "user.hydration.dehydrated";
 
-// The cloud-only emblem, a Breeze built-in resolved through the desktop icon
-// theme — it ships with every KF6 desktop (measured present in breeze and
-// breeze-dark), so the feature draws something real with no icon-install step. A
-// later slice can swap in a branded onedrive-cloud; getOverlays takes any icon
-// name, so that is a one-line change. There is deliberately no resident emblem:
-// a check on every on-device file (and every folder) is noise that reads as
-// "everything is downloaded" — only the not-here files are marked.
-constexpr const char *kCloudOnlyEmblem = "vcs-update-required"; // placeholder
+// The two state emblems, Breeze built-ins resolved through the desktop icon
+// theme (measured present in breeze and breeze-dark), so the feature draws
+// something real with no icon-install step. The pairing mirrors what a Windows
+// OneDrive user already reads at a glance: a cloud for "in the cloud, not here",
+// a green check for "on this device". Both are drawn only on FILES — never on a
+// folder, whose aggregate state one lgetxattr cannot know, and whose check was
+// the "everything is downloaded" misread an earlier cut produced.
+//
+// The history is the design: cut one badged files AND folders with a check, and
+// read as "everything downloaded"; cut two badged ONLY the cloud-only files and
+// left residents bare, and a glance could not tell "downloaded" from "unmarked
+// for some other reason". So both states now carry a distinct mark, files only.
+// A later slice can swap in branded icons; getOverlays takes any name.
+constexpr const char *kCloudOnlyEmblem = "cloud-download"; // a cloud: not here yet
+constexpr const char *kOnDeviceEmblem = "emblem-success";  // green check: on device
 
 // Where the sync roots are listed, one absolute path per line, written by
 // install-overlay.sh. The plugin only badges files under a configured root, so
@@ -68,7 +78,23 @@ class HydrationOverlayPlugin : public KOverlayIconPlugin
     Q_OBJECT
 
 public:
-    HydrationOverlayPlugin() { loadRoots(); }
+    HydrationOverlayPlugin()
+    {
+        loadRoots();
+        // Listen for the servicemenu wrappers' change announcement and PUSH a
+        // fresh overlay for each affected item. This is the KDE-blessed refresh
+        // path — KFileItemModelRolesUpdater connects to overlaysChanged — and the
+        // only one that survives an eviction: KIO's own re-query is stat-keyed and
+        // skips a file whose size and mtime did not move, so Free Up Space would
+        // otherwise leave its old badge until a manual F5. Empty service name =
+        // any sender, so it catches the wrappers' broadcast dbus-send.
+        QDBusConnection::sessionBus().connect(QString(),
+                                              QStringLiteral("/org/kde/KDirNotify"),
+                                              QStringLiteral("org.kde.KDirNotify"),
+                                              QStringLiteral("FilesChanged"),
+                                              this,
+                                              SLOT(onFilesChanged(QStringList)));
+    }
 
     QStringList getOverlays(const QUrl &item) override
     {
@@ -90,22 +116,48 @@ public:
         return probe(QFile::encodeName(path));
     }
 
+private Q_SLOTS:
+    // A wrapper changed a file's residency and announced it over KDirNotify. For
+    // every announced URL under one of our roots, push the fresh badge so Dolphin
+    // repaints it now — no stat change required, unlike KIO's own refresh. probe
+    // re-reads the mark, so Keep on Device shows the check and Free Up Space the
+    // cloud, the moment the wrapper finishes.
+    void onFilesChanged(const QStringList &urls)
+    {
+        for (const QString &u : urls) {
+            const QUrl url(u);
+            if (!url.isLocalFile())
+                continue;
+            const QString path = url.toLocalFile();
+            if (!isUnderRoot(path))
+                continue;
+            Q_EMIT overlaysChanged(url, probe(QFile::encodeName(path)));
+        }
+    }
+
 private:
-    // The one metadata probe. lgetxattr, not getxattr, so a symlink is not
-    // followed into a read of its target; NULL/0 so no value is fetched —
-    // presence is the whole signal.
+    // The metadata probe: at most two event-free syscalls, lgetxattr then (only
+    // for something with no mark) lstat. lgetxattr/lstat, not getxattr/stat, so a
+    // symlink is not followed into a read of its target; NULL/0 so no xattr value
+    // is fetched — presence of the mark is the whole cloud/resident signal. Both
+    // read metadata only: no content, no hydration.
     static QStringList probe(const QByteArray &local)
     {
-        // Only a cloud-only placeholder gets an emblem — a cloud saying "not on
-        // this device yet". Everything else draws NOTHING: a resident file, and
-        // (crucially) a directory, both answer ENODATA, and marking every local
-        // file and every folder with a check reads as "everything is downloaded"
-        // — the wrong signal in a tree that is mostly placeholders. The useful
-        // mark is the one on what is NOT here, so that is the only one drawn.
-        // ENOTSUP (no xattrs), ENOENT (raced deletion): also nothing.
+        // A placeholder carries the dehydrated mark: cloud-only, and always a
+        // regular file. Draw the cloud.
         const ssize_t r = lgetxattr(local.constData(), kDehydratedXattr, nullptr, 0);
         if (r >= 0)
-            return {QString::fromLatin1(kCloudOnlyEmblem)}; // cloud-only placeholder
+            return {QString::fromLatin1(kCloudOnlyEmblem)};
+
+        // No mark: a resident file, OR a directory, OR something with no xattrs /
+        // raced away (ENOTSUP/ENOENT). Only a resident regular FILE gets the
+        // on-device check — a directory never does, because one lgetxattr cannot
+        // tell whether its subtree is all here, and a check on every folder is
+        // exactly the "everything is downloaded" misread. lstat draws the line;
+        // anything that is not a regular file draws nothing.
+        struct stat st;
+        if (lstat(local.constData(), &st) == 0 && S_ISREG(st.st_mode))
+            return {QString::fromLatin1(kOnDeviceEmblem)};
         return {};
     }
 
