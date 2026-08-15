@@ -148,17 +148,22 @@ jobs:
   # contracts (the xattr it probes, that it reads no content); this pins that
   # the source actually compiles and links a MODULE .so against a real KF6.
   overlay-plugin:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    # In a Fedora container, not on the bare Ubuntu runner: Ubuntu 24.04's
+    # default KDE is still KF5 and Noble has no libkf6kio-dev (measured — apt
+    # exit 100, "Unable to locate package"). Fedora packages the full KF6 SDK,
+    # so this is where the second toolchain the overlay costs actually lives.
+    # The user's own desktop is a newer KF6 still; any real KF6 catches the
+    # breakage this job exists for.
+    container: fedora:41
     steps:
       - uses: actions/checkout@v5
       - name: Install the KF6 build toolchain
-        # If any of these is not in the runner's repos, this step fails loudly
-        # rather than silently skipping the build — the toolchain's availability
-        # is itself something this job is here to keep honest.
+        # No sudo: the container runs as root. If a package name is wrong for
+        # this Fedora, dnf fails loudly here rather than skipping the build.
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes \
-            cmake extra-cmake-modules qt6-base-dev libkf6kio-dev
+          dnf install -y \
+            cmake extra-cmake-modules qt6-qtbase-devel kf6-kio-devel gcc-c++ file
       - name: Configure and build the overlay plugin
         run: |
           cmake -S packaging/dolphin/overlay -B build/overlay \
