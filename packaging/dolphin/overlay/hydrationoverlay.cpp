@@ -18,20 +18,18 @@
 // integration uses. getOverlays is called on the main thread for the items
 // Dolphin is drawing — tens to hundreds, never the whole tree — so the cost is
 // O(files the user is looking at). The header requires it not block and
-// recommends a cache; we answer from an in-process cache and push a miss to a
-// worker thread, emitting overlaysChanged when the answer is ready.
+// recommends a cache; we answer synchronously with one lgetxattr and
+// deliberately do NOT cache. The probe is a metadata read of a local file
+// (microseconds, and P1 measured it fires no pre-content event), so it does not
+// meaningfully block; and not caching is what keeps the emblem correct after
+// Free Up Space or Keep on Device changes a file's residency — a path-keyed
+// cache went on returning the stale answer Dolphin drew before the change.
 #include <KOverlayIconPlugin>
 
-#include <QCoreApplication>
-#include <QDir>
 #include <QFile>
-#include <QHash>
-#include <QPointer>
-#include <QRunnable>
 #include <QStandardPaths>
 #include <QStringList>
 #include <QTextStream>
-#include <QThreadPool>
 #include <QUrl>
 
 #include <sys/xattr.h>
@@ -78,39 +76,24 @@ public:
             return {};
         const QString path = item.toLocalFile();
         if (!isUnderRoot(path))
-            return {}; // not our folder: draw nothing, badge nobody else's files
+            return {}; // not our folder: badge nobody else's files
 
-        const auto cached = m_cache.constFind(path);
-        if (cached != m_cache.constEnd())
-            return cached.value();
-
-        // Miss: answer empty now (the header forbids blocking the main thread),
-        // and compute the one lgetxattr on a worker. When it lands we cache it
-        // and emit overlaysChanged so Dolphin re-queries just this item. The
-        // worker touches no member state; the result is marshalled back to this
-        // (main) thread, so the cache is only ever read or written here and needs
-        // no lock.
-        QPointer<HydrationOverlayPlugin> self(this);
-        const QByteArray local = QFile::encodeName(path);
-        QThreadPool::globalInstance()->start(QRunnable::create([self, path, local]() {
-            const QStringList overlays = probe(local);
-            // qApp outlives every plugin, so it is a safe marshalling context;
-            // the QPointer guards the plugin itself having been destroyed.
-            QMetaObject::invokeMethod(
-                qApp,
-                [self, path, overlays]() {
-                    if (self)
-                        self->deliver(path, overlays);
-                },
-                Qt::QueuedConnection);
-        }));
-        return {};
+        // Answer synchronously with one lgetxattr, and deliberately do NOT cache.
+        // The probe is a metadata read of a local file — microseconds, and P1
+        // measured it fires no pre-content event — so it does not meaningfully
+        // block the main thread. Not caching is what keeps the emblem correct
+        // after Free Up Space or Keep on Device changes a file's residency:
+        // Dolphin re-queries the item on its next relist (the servicemenu
+        // wrappers nudge one via org.kde.KDirNotify), and a fresh probe reflects
+        // the new state. A path-keyed cache went on returning the stale answer —
+        // the "nothing happens when I click" the first cut showed.
+        return probe(QFile::encodeName(path));
     }
 
 private:
-    // The one metadata probe, run on the worker thread. lgetxattr, not getxattr,
-    // so a symlink is not followed into a read of its target; NULL/0 so no value
-    // is fetched — presence is the whole signal.
+    // The one metadata probe. lgetxattr, not getxattr, so a symlink is not
+    // followed into a read of its target; NULL/0 so no value is fetched —
+    // presence is the whole signal.
     static QStringList probe(const QByteArray &local)
     {
         // Only a cloud-only placeholder gets an emblem — a cloud saying "not on
@@ -124,12 +107,6 @@ private:
         if (r >= 0)
             return {QString::fromLatin1(kCloudOnlyEmblem)}; // cloud-only placeholder
         return {};
-    }
-
-    void deliver(const QString &path, const QStringList &overlays)
-    {
-        m_cache.insert(path, overlays);
-        Q_EMIT overlaysChanged(QUrl::fromLocalFile(path), overlays);
     }
 
     void loadRoots()
@@ -163,7 +140,6 @@ private:
         return false;
     }
 
-    QHash<QString, QStringList> m_cache;
     QStringList m_roots;
 };
 

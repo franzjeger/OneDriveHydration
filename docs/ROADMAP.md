@@ -67,3 +67,35 @@ to expose an honest sync error or unsupported operation are still in scope.
       already on disk; `docs/DOLPHIN-GROUNDWORK.md` has the measurements, the
       `st_blocks` trap it must avoid, and the stale donor plugin it would collide
       with
+
+### The neighbour-reader hydration hazard (measured live, 2026-08-15)
+
+`DOWNLOAD-VISIBILITY-GROUNDWORK.md` flagged it and deferred it here: on Linux
+there is no cloud-filter API, so **any** process that reads a placeholder's
+*content* hydrates it — a read is a read, and `FAN_PRE_ACCESS` cannot tell a
+user's `cat` from a background indexer's. The emblem plugin is safe (xattr
+metadata only, no `open`), but the file manager's own **thumbnail generation is
+not**: rendering a preview reads the file, so browsing the sync folder with
+previews on downloads every placeholder it draws.
+
+Confirmed on the live rig by isolation: an evicted file stays cloud-only only
+when Dolphin is closed *and* every `kioworker` running `kf6/kio/thumbnail.so` is
+killed — the thumbnail worker even lingers after Dolphin exits, draining its
+queue, which is what made "Free Up Space" look like a no-op (the file re-hydrated
+seconds later) and made a mostly-placeholder tree read as "everything is
+downloaded." Baloo was **not** implicated: it was disabled, and `~/OneDrive` was
+already in its `exclude folders`.
+
+- [x] **Mitigation (documented, applied per-machine): previews off for the sync
+      tree.** The reliable, recursive lever in Dolphin is
+      `GlobalViewProps=true` + a global view-property with `PreviewsShown=false`
+      — the native "uncheck Show Previews → Apply to All Folders", GUI-reversible.
+      This matches Windows' cloud-only behaviour: a type icon + cloud badge, never
+      a content thumbnail. Per-folder `.directory` is **not** recursive and would
+      write into the sync root (and upload) unless `.directory` is added to
+      `.hydration-ignore`, so it is the weaker option.
+- [ ] **Open question for the installer:** whether the product should apply the
+      previews-off setting itself (intrusive — it changes the user's Dolphin
+      globally), offer it, or only document it. Other content readers (backup
+      agents, antivirus, `updatedb`, a second indexer) remain out of the product's
+      reach and belong in user-facing docs as the same class of hazard.
