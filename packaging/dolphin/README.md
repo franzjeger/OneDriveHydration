@@ -84,14 +84,44 @@ because Dolphin runs the action detached with no terminal. Success is a
 passive popup; anything the daemon declined is modal and quoted verbatim, the
 way the flyout quotes `Error.Kept` rather than flattening it.
 
-## What is deliberately not here
+## The status overlay emblems (`overlay/`)
 
-**Status overlay emblems.** The other half of the roadmap item. There is no
-data-only path — `KOverlayIconPlugin` and `KVersionControlPlugin` are both
-compiled C++ — so it is a real dependency decision (CMake, Qt6, KF6 in a Cargo
-workspace, and a `.so` installed as root) rather than more of the same work.
-`docs/DOLPHIN-GROUNDWORK.md` records what it would need, including the per-file
-xattrs that are already on disk and the `st_blocks` trap it must not fall into.
+The third surface: a per-file badge in Dolphin — a cloud for a cloud-only
+placeholder, a check for an on-device file — so the file manager shows at a
+glance what the tray shows in aggregate. Unlike the actions above, this cannot be
+data: KDE draws third-party overlays through `KOverlayIconPlugin`, a compiled KF6
+plugin (not `KVersionControlPlugin`, which needs a sentinel file at the sync root
+and lets only one plugin own a tree). So `overlay/` is the first place this
+product needs a Qt6/KF6 toolchain to build. `docs/DOWNLOAD-VISIBILITY-GROUNDWORK.md`
+is the design and the measured gates behind it.
+
+The whole answer for one file is a single `lgetxattr` of the framework's
+`user.hydration.dehydrated` mark — metadata, never content. Measured on a real
+mount under a live mark (`HydrationAPI`'s `probes/xattrread.c`, on btrfs, ext4,
+and xfs): that read fires no pre-content event, so drawing the badge cannot
+hydrate the placeholder it draws it for, and Dolphin only asks about the files it
+is showing, never the whole tree. A resident file carries no mark, so the plugin
+is scoped to the sync roots it is told about
+(`$XDG_CONFIG_HOME/onedrive-hydration/overlay-roots`); outside them it badges
+nothing.
+
+Install it separately from the servicemenu, because the `.so` must land in the
+*system* Qt plugin dir — measured: a `~/.local/lib/qt6/plugins` plugin is not
+searched by Dolphin, only the system dir and `$QT_PLUGIN_PATH`:
+
+```
+./overlay/install-overlay.sh --mount ~/OneDrive
+```
+
+That builds the plugin (needs cmake, Qt6, and KF6 dev packages), installs it
+system-wide (sudo), writes the roots config, and removes the donor client's
+overlay plugin — which reads `user.onedrive.syncstate` and, now that this product
+ships an overlay of its own, would draw a second, wrong badge on every file. This
+first cut returns Breeze's built-in `vcs-normal` / `vcs-update-required` emblems,
+which ship with every KF6 desktop, so it draws with no icon-install step; branded
+`onedrive-cloud` / `onedrive-synced` emblems are a later slice.
+
+## What is deliberately not here
 
 **Free Up Space on a folder.** Free Up Space stays file-only on purpose —
 recursing in shell would invent a bulk evict the daemon does not offer, with none
@@ -103,9 +133,7 @@ the dehydrated files with its own judgment (confinement, skipping the framework'
 own names), and the wrapper hydrates each; see `HydrationAPI`'s
 `docs/KEEP-ON-DEVICE-GROUNDWORK.md` §3.
 
-**Anything to do with `/usr/lib/qt6/plugins/kf6/overlayicon/onedrive-overlay.so`.**
-An unpackaged overlay plugin from the donor client may still be installed
-system-wide, reading `user.onedrive.syncstate` — an xattr this product never
-writes (measured: 0 of 400 files on the live mount). `install-servicemenu.sh`
-reports it and prints the removal command; it does not run it. That file is
-root-owned and outside the per-user scope this script installs into.
+The donor client's `onedrive-overlay.so` used to be listed here as untouched,
+because this product shipped no overlay to collide with it. That is no longer
+true — the overlay above ships now — so its removal moved into
+`overlay/install-overlay.sh`, which owns the collision.

@@ -317,12 +317,18 @@ fn the_installer_script_refuses_before_it_generates() {
         install.contains("onedrive-hydrationctl is missing or not executable"),
         "a missing CLI must be refused at install time, not at click time"
     );
-    // The stale donor plugin is reported and never removed.
-    assert!(install.contains("user.onedrive.syncstate"));
-    assert!(install.contains("sudo rm"), "the removal is printed");
+    // The donor-plugin handling moved to overlay/install-overlay.sh: this
+    // product now ships an overlay of its own, so the donor is a real collision
+    // that installer owns (dolphin_overlay_package.rs holds it). A per-user data
+    // install has no business deleting from /usr, so the servicemenu installer
+    // points at the overlay installer and touches no system plugin itself.
     assert!(
-        !install.contains("\nsudo rm") && !install.contains("$(sudo"),
-        "printed, never executed"
+        install.contains("overlay/install-overlay.sh"),
+        "the servicemenu installer must point at the overlay installer"
+    );
+    assert!(
+        !install.contains("sudo rm"),
+        "donor removal is the overlay installer's job now, not the servicemenu's"
     );
     // Measured: no cache rebuild is needed, so the script must not ask for one.
     assert!(

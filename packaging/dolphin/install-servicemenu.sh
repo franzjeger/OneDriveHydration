@@ -125,34 +125,15 @@ if ! command -v kdialog >/dev/null 2>&1 && ! command -v notify-send >/dev/null 2
     printf 'a file. It will still work; the answers go to stderr.\n'
 fi
 
-# The other Dolphin surface, reported because it is invisible from inside
-# Dolphin and belongs to nobody. A KOverlayIconPlugin from the donor client can
-# still be installed system-wide, reading an xattr this product does not write:
-# `user.onedrive.syncstate`, where the deployment writes `user.hydration.*`.
-# Measured on the live mount: 0 of 400 files carried the old name.
-#
-# Reported and never removed. It is a root-owned file outside this user's
-# scope, and a per-user script that deleted from /usr would be doing something
-# nobody asked it to.
-found=''
-for dir in /usr/lib/qt6/plugins/kf6/overlayicon /usr/lib64/qt6/plugins/kf6/overlayicon \
-    "$data_home/../lib/qt6/plugins/kf6/overlayicon"; do
-    [ -d "$dir" ] || continue
-    real=$(readlink -f -- "$dir" 2>/dev/null) || continue
-    case " $found " in
-        *" $real "*) continue ;;
-    esac
-    found="$found $real"
-    for so in "$real"/*onedrive*.so; do
-        [ -e "$so" ] || continue
-        printf '\nnote: a OneDrive Dolphin overlay plugin is installed system-wide:\n'
-        printf '  %s\n' "$so"
-        printf 'This product does not ship one and does not manage that file. If it is\n'
-        printf 'the donor client'"'"'s plugin it reads user.onedrive.syncstate, which this\n'
-        printf 'deployment never writes — it writes user.hydration.* — so it draws no\n'
-        printf 'emblems here. Check with:\n'
-        printf '  getfattr -d -m user %s/<some file>\n' "$mount"
-        printf 'and if it is dead weight, remove it yourself:\n'
-        printf '  sudo rm %s\n' "$so"
-    done
-done
+# The other Dolphin surface. The per-file on-device / cloud-only emblems now
+# ship too — but as a compiled KF6 overlay plugin, not data, so they have their
+# own installer, overlay/install-overlay.sh. That installer also owns the donor
+# collision: the old OneDriveForLinux client's overlay plugin reads
+# `user.onedrive.syncstate` (this product writes `user.hydration.*`), and now
+# that we ship an overlay of our own the two would double-badge, so the overlay
+# installer removes it. This servicemenu installer no longer touches that plugin
+# — a per-user data install has no business deleting from /usr, and the donor
+# alone, without our overlay, draws nothing here anyway.
+printf '\nThe on-device / cloud-only emblems ship separately, as a compiled\n'
+printf 'plugin. Install them (and clear the donor overlay collision) with:\n'
+printf '  %s\n' "$here/overlay/install-overlay.sh"
