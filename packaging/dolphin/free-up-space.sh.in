@@ -86,6 +86,26 @@ for f in "$@"; do
     esac
 
     reply=$("$CTL" evict "$rel" 2>&1) || true
+
+    # Free Up Space is the inverse of Keep on Device, so a file the user kept and
+    # now asks to free is un-kept: a DIRECTLY pinned file is unpinned and evicted
+    # again — the way "Free up space" clears "Always keep on this device" on
+    # Windows. A file pinned through an ANCESTOR folder is left alone: unpinning
+    # the file would not help (the folder's pin still protects it) and silently
+    # un-keeping the whole folder is not what was asked, so its refusal is shown
+    # verbatim and names the folder to free instead. The `via` path the daemon
+    # reports is read from the reply string, never from the file — no content is
+    # opened here.
+    case "$reply" in
+        *'Pinned { via:'*)
+            via=$(printf '%s' "$reply" | sed -n 's/.*via: "\(.*\)".*/\1/p')
+            if [ "$via" = "$abs" ]; then
+                "$CTL" unpin "$rel" >/dev/null 2>&1 || true
+                reply=$("$CTL" evict "$rel" 2>&1) || true
+            fi
+            ;;
+    esac
+
     case "$reply" in
         "reclaimed "*" bytes")
             n=${reply#reclaimed }
