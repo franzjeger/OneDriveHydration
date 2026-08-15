@@ -139,3 +139,39 @@ jobs:
       - run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # The one compiled non-Rust artifact: the Dolphin overlay plugin
+  # (packaging/dolphin/overlay/). cargo never sees it, so without this job a
+  # change that breaks it against KF6 lands unnoticed. This is the second
+  # toolchain the overlay always cost — Qt6 + KF6 + ECM on top of Rust — and
+  # `cargo test`'s dolphin_overlay_package.rs still pins the source-level
+  # contracts (the xattr it probes, that it reads no content); this pins that
+  # the source actually compiles and links a MODULE .so against a real KF6.
+  overlay-plugin:
+    runs-on: ubuntu-latest
+    # In a Fedora container, not on the bare Ubuntu runner: Ubuntu 24.04's
+    # default KDE is still KF5 and Noble has no libkf6kio-dev (measured — apt
+    # exit 100, "Unable to locate package"). Fedora packages the full KF6 SDK,
+    # so this is where the second toolchain the overlay costs actually lives.
+    # The user's own desktop is a newer KF6 still; any real KF6 catches the
+    # breakage this job exists for.
+    container: fedora:41
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install the KF6 build toolchain
+        # No sudo: the container runs as root. If a package name is wrong for
+        # this Fedora, dnf fails loudly here rather than skipping the build.
+        run: |
+          dnf install -y \
+            cmake extra-cmake-modules qt6-qtbase-devel kf6-kio-devel gcc-c++ file
+      - name: Configure and build the overlay plugin
+        run: |
+          cmake -S packaging/dolphin/overlay -B build/overlay \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/overlay
+      - name: A MODULE .so was produced (not a static .a fallback)
+        run: |
+          so=$(find build/overlay -name 'onedrive-hydration-overlay.so' | head -n1)
+          test -n "$so" || { echo "no plugin .so was built"; find build/overlay -name '*.so' -o -name '*.a'; exit 1; }
+          file "$so" | grep -q 'shared object'
+          echo "built $so"
