@@ -94,6 +94,21 @@ ColumnLayout {
         PlasmaComponents3.Label {
             text: full.host.count(full.host.excluded, "file", "files")
         }
+
+        // Only while something is actually coming down. Both cells hide together,
+        // and a GridLayout skips invisible items, so the row collapses cleanly
+        // when the count is zero rather than leaving a blank line. Informational,
+        // not an attention state — it is a plain row like the two above, never a
+        // colour or a warning.
+        PlasmaComponents3.Label {
+            visible: full.host.downloading > 0
+            text: "Downloading:"
+            opacity: 0.75
+        }
+        PlasmaComponents3.Label {
+            visible: full.host.downloading > 0
+            text: full.host.count(full.host.downloading, "file", "files")
+        }
     }
 
     PlasmaComponents3.Label {

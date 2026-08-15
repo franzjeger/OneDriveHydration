@@ -89,6 +89,7 @@ fn properties_update_and_state_changed_fires_once_per_publish() {
             unsent: 5,
             excluded: 2,
             exposures: 1,
+            downloading: 0,
         },
     )
     .unwrap();
@@ -145,12 +146,69 @@ fn credential_state_is_a_property_and_a_signal_of_its_own() {
             unsent: 1,
             excluded: 2,
             exposures: 0,
+            downloading: 0,
         },
     )
     .unwrap();
     let msg = state_signals.next().unwrap();
     let body: (bool, u64, u64, u64) = msg.body().deserialize().unwrap();
     assert_eq!(body, (true, 1, 2, 0));
+}
+
+#[test]
+fn download_count_is_a_property_and_a_signal_of_its_own() {
+    let (server, client) = served_pair(ControlSurface::new(PathBuf::from("/nonexistent"), None));
+    let proxy = tray_proxy(&client);
+    assert_eq!(proxy.get_property::<u64>("Downloading").unwrap(), 0);
+
+    let mut downloads = proxy.receive_signal("DownloadChanged").unwrap();
+    let mut states = proxy.receive_signal("StateChanged").unwrap();
+    let iface = server
+        .object_server()
+        .interface::<_, ControlSurface>(OBJECT_PATH)
+        .unwrap();
+    let publish = |unsent, downloading| {
+        publish_state(
+            &iface,
+            DaemonState {
+                daemon_running: true,
+                unsent,
+                excluded: 0,
+                exposures: 0,
+                downloading,
+            },
+        )
+        .unwrap();
+    };
+
+    // A state that starts a download: DownloadChanged carries the count, and the
+    // same publish's StateChanged still deserializes as the pinned
+    // (bool,u64,u64,u64) — proof downloading was not crammed into it.
+    publish(1, 2);
+    let d: (u64,) = downloads.next().unwrap().body().deserialize().unwrap();
+    assert_eq!(d, (2,));
+    let s: (bool, u64, u64, u64) = states.next().unwrap().body().deserialize().unwrap();
+    assert_eq!(
+        s,
+        (true, 1, 0, 0),
+        "StateChanged keeps its four-argument shape"
+    );
+    assert_eq!(proxy.get_property::<u64>("Downloading").unwrap(), 2);
+
+    // A state where only a counter moved fires StateChanged but not
+    // DownloadChanged; the next DownloadChanged is the later real 2->5 move, so
+    // its value being 5 (not a repeated 2) proves the unsent-only publish in
+    // between flapped no download signal.
+    publish(9, 2); // unsent moved, downloading unchanged
+    let s: (bool, u64, u64, u64) = states.next().unwrap().body().deserialize().unwrap();
+    assert_eq!(s, (true, 9, 0, 0));
+    publish(9, 5); // downloading moved
+    let d: (u64,) = downloads.next().unwrap().body().deserialize().unwrap();
+    assert_eq!(
+        d,
+        (5,),
+        "the second DownloadChanged is the 2->5 move; the unsent-only publish fired none"
+    );
 }
 
 #[test]
