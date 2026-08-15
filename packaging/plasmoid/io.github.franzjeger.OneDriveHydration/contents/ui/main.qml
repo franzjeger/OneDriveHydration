@@ -69,6 +69,12 @@ PlasmoidItem {
     // like the counters above: it is only shown while it is above zero.
     property double downloading: 0
 
+    // Whether the daemon is applying a cloud delta right now — the tray's
+    // "Indexing…". Its own Indexing property and IndexingChanged signal, the same
+    // pattern as downloading, so a service too old to expose it is simply not
+    // shown as indexing (u64(undefined)/false).
+    property bool indexing: false
+
     // The daemon's sign-in conclusion, from the CredentialState property and
     // the CredentialStateChanged signal. "unknown" until a running daemon
     // asserts one; words this build does not recognise behave as "unknown"
@@ -95,6 +101,7 @@ PlasmoidItem {
     property int stateGeneration: 0
     property int credentialGeneration: 0
     property int downloadGeneration: 0
+    property int indexGeneration: 0
 
     // The sync root. The daemon knows its mount but the D-Bus surface does
     // not expose it, so like the tray (which is told with --mount) the
@@ -284,6 +291,14 @@ PlasmoidItem {
         root.downloading = root.u64(value);
     }
 
+    // Indexing rides its own signal too, so it carries its own generation the
+    // same way — an IndexingChanged that lands while a cold GetAll is in flight
+    // must win over the older read.
+    function applyIndexing(value) {
+        root.indexGeneration += 1;
+        root.indexing = value === true;
+    }
+
     // The one cold read. Each half is applied only if no signal of its kind
     // arrived while the read was in flight: a signal always carries newer
     // knowledge than a read issued before it, and the service emits each
@@ -293,6 +308,7 @@ PlasmoidItem {
         const stateGeneration = root.stateGeneration;
         const credentialGeneration = root.credentialGeneration;
         const downloadGeneration = root.downloadGeneration;
+        const indexGeneration = root.indexGeneration;
         DBus.SessionBus.asyncCall({
             service: root.busName,
             path: root.objectPath,
@@ -315,6 +331,11 @@ PlasmoidItem {
             // it; u64(undefined) is 0, which is the right "not downloading".
             if (downloadGeneration === root.downloadGeneration) {
                 root.applyDownloading(properties.Downloading);
+            }
+            // Indexing may be undefined against a service too old to expose it;
+            // `=== true` makes that the right "not indexing".
+            if (indexGeneration === root.indexGeneration) {
+                root.applyIndexing(properties.Indexing);
             }
         }, error => {
             // The service raced away between appearing and answering; the
@@ -421,6 +442,12 @@ PlasmoidItem {
         // an older flyout ignores it and a newer one shows it.
         function dbusDownloadChanged(downloading) {
             root.applyDownloading(downloading);
+        }
+
+        // Whether a cloud delta is applying, on its own member for the same
+        // reason: an older flyout has no dbusIndexingChanged and ignores it.
+        function dbusIndexingChanged(indexing) {
+            root.applyIndexing(indexing);
         }
     }
 

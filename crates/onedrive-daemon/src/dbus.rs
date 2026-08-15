@@ -88,6 +88,11 @@ pub struct DaemonState {
     /// "downloading N". Live, not walk-derived; 0 or 1 today, since the client
     /// serves one fetch at a time.
     pub downloading: u64,
+    /// Whether the daemon is applying a cloud delta right now — the framework's
+    /// watch-line `scanning` key (its `delta_busy` flag), surfaced here as the
+    /// product's "Indexing…". A first sync or a large cloud change is when a user
+    /// most wants a sign the daemon is working rather than stuck.
+    pub indexing: bool,
 }
 
 /// Fold one `watch` state line into `state`. Returns whether the line carried
@@ -113,6 +118,9 @@ pub fn apply_state_line(line: &str, state: &mut DaemonState) -> bool {
             "excluded" => state.excluded = value,
             "exposures" => state.exposures = value,
             "downloading" => state.downloading = value,
+            // The framework renders a bool as `<u64>` (0/1); the product's
+            // "Indexing" is that flag, true for any non-zero.
+            "scanning" => state.indexing = value != 0,
             _ => continue,
         }
         recognized = true;
@@ -464,6 +472,14 @@ impl ControlSurface {
         self.state.downloading
     }
 
+    /// Whether a cloud delta is applying right now — the tray's "Indexing…".
+    /// A separate property (and its own PropertiesChanged) from `Downloading`,
+    /// so a state that only starts a pass does not flap the download count.
+    #[zbus(property)]
+    fn indexing(&self) -> bool {
+        self.state.indexing
+    }
+
     /// The daemon's sign-in conclusion: `"healthy"`, `"unsaved"` (signed in
     /// and syncing, but the rotated credential cannot be written to Secret
     /// Service), `"rejected"` (the service has conclusively refused the
@@ -558,6 +574,15 @@ impl ControlSurface {
         emitter: &SignalEmitter<'_>,
         downloading: u64,
     ) -> zbus::Result<()>;
+
+    /// Whether a cloud delta is applying, `IndexingChanged`. Its own signal, not
+    /// a `StateChanged` argument, for the same reason `DownloadChanged` is:
+    /// existing subscribers deserialize `StateChanged` by its exact
+    /// `(bool,u64,u64,u64)` signature and would silently drop a grown one. (The
+    /// Rust name differs from the wire name because the `indexing` property
+    /// already generates an `indexing_changed` emitter for `PropertiesChanged`.)
+    #[zbus(signal, name = "IndexingChanged")]
+    pub async fn index_changed(emitter: &SignalEmitter<'_>, indexing: bool) -> zbus::Result<()>;
 }
 
 /// Push a new state into a served [`ControlSurface`]: update the properties,
@@ -611,6 +636,9 @@ pub fn publish_state(
         if previous.downloading != state.downloading {
             surface.downloading_changed(emitter).await?;
         }
+        if previous.indexing != state.indexing {
+            surface.indexing_changed(emitter).await?;
+        }
         // StateChanged keeps its pinned (bool,u64,u64,u64) shape and fires once
         // per distinct state, as before — downloading is deliberately not one of
         // its arguments. It rides its own DownloadChanged instead, emitted only
@@ -626,6 +654,9 @@ pub fn publish_state(
         .await?;
         if previous.downloading != state.downloading {
             ControlSurface::download_changed(emitter, state.downloading).await?;
+        }
+        if previous.indexing != state.indexing {
+            ControlSurface::index_changed(emitter, state.indexing).await?;
         }
         Ok(())
     })
@@ -652,6 +683,7 @@ mod tests {
                 excluded: 10,
                 exposures: 1,
                 downloading: 1,
+                indexing: false,
             }
         );
         // A later line may carry fewer keys; the missing ones keep their
@@ -672,6 +704,24 @@ mod tests {
         // A known key with an unparseable value keeps the previous value.
         assert!(apply_state_line("unsent=lots excluded=3", &mut state));
         assert_eq!((state.unsent, state.excluded), (1, 3));
+    }
+
+    #[test]
+    fn the_frameworks_scanning_key_maps_to_the_indexing_flag() {
+        // The framework renders the delta pass as a `<u64>` (0/1); the product's
+        // Indexing is that flag, true for any non-zero, false otherwise.
+        let mut state = DaemonState::default();
+        assert!(!state.indexing, "default is not indexing");
+        assert!(apply_state_line("scanning=1", &mut state));
+        assert!(state.indexing, "scanning=1 raises indexing");
+        assert!(apply_state_line("scanning=0", &mut state));
+        assert!(!state.indexing, "scanning=0 clears it");
+        // Carried alongside the counters on a full line, and independent of them.
+        assert!(apply_state_line(
+            "unsent=0 downloading=1 scanning=1",
+            &mut state
+        ));
+        assert!(state.indexing && state.downloading == 1);
     }
 
     #[test]
@@ -760,6 +810,7 @@ mod tests {
             // None of the daemon lines above carry `downloading`, so every
             // published state keeps the default zero.
             downloading: 0,
+            indexing: false,
         };
         assert_eq!(
             published,

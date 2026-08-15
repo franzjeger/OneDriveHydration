@@ -795,6 +795,9 @@ fn read_service_state(connection: &zbus::blocking::Connection) -> Option<DaemonS
         // would make the whole cold read fail against a daemon too old to have
         // the property.
         downloading: 0,
+        // Same: the tray icon does not distinguish an indexing state; the
+        // plasmoid's "Indexing…" row reads the Indexing property directly.
+        indexing: false,
     })
 }
 
@@ -933,6 +936,9 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
                         // StateChanged does not carry downloading (it rides its
                         // own DownloadChanged signal); the tray does not show it.
                         downloading: 0,
+                        // Same for indexing — its own IndexingChanged signal, and
+                        // the tray does not show it either.
+                        indexing: false,
                     }))
                     .is_err()
                 {
@@ -1075,6 +1081,7 @@ mod tests {
             excluded,
             exposures,
             downloading: 0,
+            indexing: false,
         }
     }
 

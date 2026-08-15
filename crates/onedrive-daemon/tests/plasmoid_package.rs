@@ -38,6 +38,7 @@ fn state(daemon_running: bool, unsent: u64, excluded: u64, exposures: u64) -> Da
         excluded,
         exposures,
         downloading: 0,
+        indexing: false,
     }
 }
 
@@ -105,6 +106,12 @@ fn the_flyout_dials_the_surface_this_crate_serves() {
         "the flyout must subscribe to DownloadChanged, not poll"
     );
     assert!(qml.contains("properties.Downloading"));
+    // The indexing flag rides its own member and property in the same shape.
+    assert!(
+        qml.contains("function dbusIndexingChanged("),
+        "the flyout must subscribe to IndexingChanged, not poll"
+    );
+    assert!(qml.contains("properties.Indexing"));
     // The documented complement to the signal: one cold read of all the
     // properties when the service (re)appears.
     assert!(qml.contains("\"GetAll\""));

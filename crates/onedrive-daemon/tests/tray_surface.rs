@@ -140,6 +140,7 @@ impl StateService {
                 excluded,
                 exposures,
                 downloading: 0,
+                indexing: false,
             },
         )
         .unwrap();

@@ -90,6 +90,7 @@ fn properties_update_and_state_changed_fires_once_per_publish() {
             excluded: 2,
             exposures: 1,
             downloading: 0,
+            indexing: false,
         },
     )
     .unwrap();
@@ -147,6 +148,7 @@ fn credential_state_is_a_property_and_a_signal_of_its_own() {
             excluded: 2,
             exposures: 0,
             downloading: 0,
+            indexing: false,
         },
     )
     .unwrap();
@@ -176,6 +178,7 @@ fn download_count_is_a_property_and_a_signal_of_its_own() {
                 excluded: 0,
                 exposures: 0,
                 downloading,
+                indexing: false,
             },
         )
         .unwrap();
@@ -209,6 +212,54 @@ fn download_count_is_a_property_and_a_signal_of_its_own() {
         (5,),
         "the second DownloadChanged is the 2->5 move; the unsent-only publish fired none"
     );
+}
+
+#[test]
+fn indexing_is_a_property_and_a_signal_of_its_own() {
+    let (server, client) = served_pair(ControlSurface::new(PathBuf::from("/nonexistent"), None));
+    let proxy = tray_proxy(&client);
+    assert!(!proxy.get_property::<bool>("Indexing").unwrap());
+
+    let mut indexings = proxy.receive_signal("IndexingChanged").unwrap();
+    let iface = server
+        .object_server()
+        .interface::<_, ControlSurface>(OBJECT_PATH)
+        .unwrap();
+    let publish = |unsent, indexing| {
+        publish_state(
+            &iface,
+            DaemonState {
+                daemon_running: true,
+                unsent,
+                excluded: 0,
+                exposures: 0,
+                downloading: 0,
+                indexing,
+            },
+        )
+        .unwrap();
+    };
+
+    // A pass starts: IndexingChanged carries true and the property flips — and,
+    // like DownloadChanged, it is its own signal, not an argument grown onto
+    // StateChanged's pinned (bool,u64,u64,u64).
+    publish(1, true);
+    let i: (bool,) = indexings.next().unwrap().body().deserialize().unwrap();
+    assert_eq!(i, (true,));
+    assert!(proxy.get_property::<bool>("Indexing").unwrap());
+
+    // A counter-only move fires no IndexingChanged; the next one is the
+    // true->false stop, so its value being false (not a repeated true) proves the
+    // unsent-only publish in between flapped no indexing signal.
+    publish(9, true); // unsent moved, indexing unchanged
+    publish(9, false); // pass ended
+    let i: (bool,) = indexings.next().unwrap().body().deserialize().unwrap();
+    assert_eq!(
+        i,
+        (false,),
+        "the second IndexingChanged is the true->false stop; the unsent-only publish fired none"
+    );
+    assert!(!proxy.get_property::<bool>("Indexing").unwrap());
 }
 
 #[test]

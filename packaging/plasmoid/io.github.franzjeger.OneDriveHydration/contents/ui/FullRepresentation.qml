@@ -109,6 +109,20 @@ ColumnLayout {
             visible: full.host.downloading > 0
             text: full.host.count(full.host.downloading, "file", "files")
         }
+
+        // The delta pass, the same kind of plain informational row: shown only
+        // while the daemon is actually applying a cloud change — a first sync or
+        // a large one — and collapsed otherwise. A bool, not a count, so the
+        // value cell is a fixed word rather than a number.
+        PlasmaComponents3.Label {
+            visible: full.host.indexing
+            text: "Status:"
+            opacity: 0.75
+        }
+        PlasmaComponents3.Label {
+            visible: full.host.indexing
+            text: "Indexing…"
+        }
     }
 
     PlasmaComponents3.Label {
