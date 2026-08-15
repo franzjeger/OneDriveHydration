@@ -49,13 +49,12 @@ urlencode() {
     printf '%s' "$_o"
 }
 
-# After a file is hydrated its residency moved (cloud-only -> on device), so its
-# emblem must be re-queried or Dolphin leaves the old one. Send the standard
-# org.kde.KDirNotify.FilesChanged; because the plugin does not cache, any re-query
-# returns the fresh state. Hydration changes size and mtime, so an open view is
-# far likelier to repaint here than on eviction, but the exact already-open
-# refresh path is still the unmeasured P3 question — a fresh listing always shows
-# it correctly.
+# Announce a residency change so the overlay plugin repaints the badge now. The
+# plugin LISTENS for org.kde.KDirNotify.FilesChanged and pushes a fresh badge via
+# KOverlayIconPlugin::overlaysChanged, which repaints regardless of stat — the one
+# refresh that survives an eviction (its sibling Free Up Space leaves size and
+# mtime unchanged), so both wrappers announce changes the same way. FilesChanged
+# takes a QStringList.
 refresh_overlay() {
     command -v dbus-send >/dev/null 2>&1 || return 0
     dbus-send --session --type=signal /org/kde/KDirNotify \

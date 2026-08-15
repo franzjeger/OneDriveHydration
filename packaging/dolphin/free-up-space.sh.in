@@ -45,14 +45,15 @@ urlencode() {
     printf '%s' "$_o"
 }
 
-# After a file's residency changes, send the standard KIO signal that a file
-# changed, org.kde.KDirNotify.FilesChanged, so open views (Dolphin) re-query the
-# item. Because the plugin does not cache, any re-query returns the fresh state,
-# so a fresh listing always draws the right badge. Whether an ALREADY-open view
-# repaints the badge without a manual reload — especially after eviction, where
-# size and mtime barely move and KIO may skip the re-query — is the refresh
-# question docs/DOWNLOAD-VISIBILITY-GROUNDWORK.md leaves to P3 and this has not
-# measured; the signal is the right nudge to send regardless.
+# Announce a residency change so the overlay plugin repaints the badge now.
+#
+# Eviction leaves a file's size and mtime unchanged (only st_blocks drops), so
+# KIO's own stat-keyed refresh never re-runs the overlay — the badge would stay
+# until a manual F5, the "Free Up Space did nothing" the user saw. The overlay
+# plugin closes that gap: it LISTENS for this exact org.kde.KDirNotify.FilesChanged
+# and pushes a fresh badge via KOverlayIconPlugin::overlaysChanged, which repaints
+# regardless of stat. So all this has to do is name the file; the plugin does the
+# rest. FilesChanged takes a QStringList.
 refresh_overlay() {
     command -v dbus-send >/dev/null 2>&1 || return 0
     dbus-send --session --type=signal /org/kde/KDirNotify \
