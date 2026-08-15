@@ -24,6 +24,23 @@ files_word() {
     if [ "$1" -eq 1 ]; then printf 'file'; else printf 'files'; fi
 }
 
+# "item" not "file": a Keep on Device target can be a folder, and calling a
+# pinned folder "1 file" is the confusing report this wording replaces.
+items_word() {
+    if [ "$1" -eq 1 ]; then printf 'item'; else printf 'items'; fi
+}
+
+# The download half of the result line: how many files came down, or that
+# there was nothing to pull. Kept separate so "kept N on device" never implies
+# a download that did not happen (the 0B-pulled confusion).
+pull_summary() {
+    if [ "$pulled_files" -gt 0 ]; then
+        printf 'pulled %s %s down (%s)' "$pulled_files" "$(files_word "$pulled_files")" "$(human "$pulled")"
+    else
+        printf 'already on device'
+    fi
+}
+
 # Dolphin runs this detached with no terminal, so anything printed to stdout is
 # gone. Success is a passive popup nobody has to dismiss; a refusal is modal,
 # because the whole point of quoting the daemon verbatim is that somebody reads
@@ -51,8 +68,9 @@ say() {
 
 [ "$#" -gt 0 ] || exit 0
 
-kept=0
-pulled=0
+kept=0          # items pinned (files and folders)
+pulled=0        # bytes brought resident
+pulled_files=0  # files whose content actually came down
 problems=''
 
 for f in "$@"; do
@@ -129,6 +147,9 @@ for f in "$@"; do
                         '' | *[!0-9]*) n=0 ;;
                     esac
                     pulled=$((pulled + n))
+                    # Only count a file as "pulled" if bytes actually came down;
+                    # a 0-byte hydrate means it was already resident.
+                    [ "$n" -gt 0 ] && pulled_files=$((pulled_files + 1))
                     ;;
                 *)
                     problems="${problems}${MOUNT}/${childrel}
@@ -153,6 +174,7 @@ EOF
                 '' | *[!0-9]*) n=0 ;;
             esac
             pulled=$((pulled + n))
+            [ "$n" -gt 0 ] && pulled_files=$((pulled_files + 1))
             ;;
         *)
             # Pinned but not pulled: the file is kept from eviction, but its
@@ -165,11 +187,11 @@ EOF
 done
 
 if [ -z "$problems" ]; then
-    say ok "Kept $kept $(files_word "$kept") on device, $(human "$pulled") pulled down."
+    say ok "Kept $kept $(items_word "$kept") on device — $(pull_summary)."
 else
     done_part=''
     if [ "$kept" -gt 0 ]; then
-        done_part="Kept $kept $(files_word "$kept") on device, $(human "$pulled") pulled down.
+        done_part="Kept $kept $(items_word "$kept") on device — $(pull_summary).
 
 "
     fi
