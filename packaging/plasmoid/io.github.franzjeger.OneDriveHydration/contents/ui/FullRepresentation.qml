@@ -125,6 +125,17 @@ ColumnLayout {
         }
     }
 
+    // Indeterminate progress bar: shown while the daemon is actively
+    // downloading files (Downloading > 0) or applying a cloud delta
+    // (Indexing == true). Mirrors the OneDrive tray's spinning indicator.
+    PlasmaComponents3.ProgressBar {
+        visible: full.host.downloading > 0 || full.host.indexing
+        from: 0
+        to: 1
+        value: 0
+        Layout.fillWidth: true
+    }
+
     PlasmaComponents3.Label {
         visible: full.host.evictResult !== ""
         text: full.host.evictResult

@@ -15,13 +15,19 @@ Type=Service
 #     selection offers nothing rather than the wrong thing, exactly as the
 #     all/allfiles file entry does for its mirror case.
 MimeType=inode/directory;
-Actions=onedriveHydrationKeepOnDevice;
+# TopLevel (read from this [Desktop Entry] group, not the action groups): kio
+# buckets priority-less services into the "Actions" submenu, which buries these
+# two. TopLevel lifts them to the top of the context menu, where a OneDrive
+# user expects "Free Up Space" / "Keep on Device" to be.
+X-KDE-Priority=TopLevel
+Actions=onedriveHydrationFreeUpSpace;onedriveHydrationKeepOnDevice;
+
+[Desktop Action onedriveHydrationFreeUpSpace]
+Name=Free Up Space
+Icon=onedrive-hydration
+Exec=@ACTION3@ %F
 
 [Desktop Action onedriveHydrationKeepOnDevice]
-# The same wrapper the file entry names (@ACTION2@ = keep-on-device.sh): it pins
-# the directory and then pulls its dehydrated files down one at a time via the
-# daemon's `pending` enumeration. A directory reaching keep-on-device.sh is the
-# case that wrapper's `[ -d ]` branch exists for.
 Name=Keep on Device
 Icon=onedrive-hydration
 Exec=@ACTION2@ %F

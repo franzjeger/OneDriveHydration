@@ -36,6 +36,7 @@
 
 #include <sys/stat.h>
 #include <sys/xattr.h>
+#include <dirent.h>
 #include <cerrno>
 
 namespace
@@ -149,14 +150,96 @@ private:
         if (r >= 0)
             return {QString::fromLatin1(kCloudOnlyEmblem)};
 
-        // No mark: a resident file, OR a directory, OR something with no xattrs /
-        // raced away (ENOTSUP/ENOENT). Only a resident regular FILE gets the
-        // on-device check — a directory never does, because one lgetxattr cannot
-        // tell whether its subtree is all here, and a check on every folder is
-        // exactly the "everything is downloaded" misread. lstat draws the line;
-        // anything that is not a regular file draws nothing.
         struct stat st;
-        if (lstat(local.constData(), &st) == 0 && S_ISREG(st.st_mode))
+        if (lstat(local.constData(), &st) != 0)
+            return {};
+
+        if (S_ISREG(st.st_mode))
+            return {QString::fromLatin1(kOnDeviceEmblem)};
+
+        if (S_ISDIR(st.st_mode))
+            return probeDirectory(local);
+
+        return {};
+    }
+
+    // For a directory, walk its subtree (bounded) to find files and determine
+    // whether the folder is predominantly cloud-only or resident. This mirrors
+    // what OneDrive on Windows does: a folder gets a cloud icon if it contains
+    // cloud-only files anywhere in its tree.
+    //
+    // Bounded: at most kMaxFiles files are examined and at most kMaxDepth
+    // directory levels are descended. This keeps the probe fast even on a
+    // folder with 100k files — we stop as soon as we have a verdict.
+    static QStringList probeDirectory(const QByteArray &local)
+    {
+        const int kMaxFiles = 30;
+        const int kMaxDepth = 4;
+
+        int filesChecked = 0;
+        bool anyDehydrated = false;
+        bool anyResident = false;
+
+        // BFS with an explicit queue of directories to visit.
+        QByteArray queue[64];
+        int qHead = 0, qTail = 0;
+        queue[qTail++] = local;
+
+        int depth = 0;
+        while (qHead < qTail && depth < kMaxDepth) {
+            // Process all directories at this depth level.
+            int levelEnd = qTail;
+            while (qHead < levelEnd) {
+                QByteArray dir = queue[qHead++];
+                if (filesChecked >= kMaxFiles)
+                    break;
+
+                DIR *d = opendir(dir.constData());
+                if (!d)
+                    continue;
+
+                while (struct dirent *e = readdir(d)) {
+                    if (e->d_name[0] == '.' && (e->d_name[1] == '\0' ||
+                        (e->d_name[1] == '.' && e->d_name[2] == '\0')))
+                        continue;
+
+                    QByteArray child = dir + "/" + e->d_name;
+
+                    // Skip the framework's own internal files.
+                    if (strncmp(e->d_name, ".hydration-", 11) == 0 ||
+                        strncmp(e->d_name, ".onedrive-", 10) == 0)
+                        continue;
+
+                    const ssize_t r = lgetxattr(child.constData(), kDehydratedXattr, nullptr, 0);
+                    if (r >= 0) {
+                        // Found a cloud-only file: verdict is cloud.
+                        anyDehydrated = true;
+                        closedir(d);
+                        goto done;
+                    }
+
+                    struct stat cst;
+                    if (lstat(child.constData(), &cst) == 0) {
+                        if (S_ISREG(cst.st_mode)) {
+                            anyResident = true;
+                            if (++filesChecked >= kMaxFiles) {
+                                closedir(d);
+                                goto done;
+                            }
+                        } else if (S_ISDIR(cst.st_mode) && qTail < 64) {
+                            queue[qTail++] = child;
+                        }
+                    }
+                }
+                closedir(d);
+            }
+            depth++;
+        }
+
+    done:
+        if (anyDehydrated)
+            return {QString::fromLatin1(kCloudOnlyEmblem)};
+        if (anyResident)
             return {QString::fromLatin1(kOnDeviceEmblem)};
         return {};
     }

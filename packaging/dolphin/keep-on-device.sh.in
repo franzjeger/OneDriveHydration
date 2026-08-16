@@ -10,6 +10,11 @@ MOUNT='@MOUNT@'
 CTL='@CTL@'
 TITLE='OneDrive Hydration'
 
+# Dolphin spawns this with a minimal environment. kdialog and notify-send
+# need the session bus and runtime dir to work, so restore them.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+
 human() {
     # iec-i, not iec: the daemon counts bytes, and `--to=iec` would render
     # 8192 as "8.0KB" — a decimal-looking label on a binary quantity.
@@ -22,6 +27,20 @@ human() {
 
 files_word() {
     if [ "$1" -eq 1 ]; then printf 'file'; else printf 'files'; fi
+}
+
+# Seconds -> "Hh MMm" / "MMm SSs" / "SSs", for the ETA in the progress label.
+# Integer shell math only: the whole point is a number a person can read at a
+# glance, and the per-file latency (~300ms) dwarfs the sub-second remainder.
+fmt_dur() {
+    _s=$1
+    if [ "$_s" -ge 3600 ]; then
+        printf '%dh %02dm' $((_s/3600)) $(((_s%3600)/60))
+    elif [ "$_s" -ge 60 ]; then
+        printf '%dm %02ds' $((_s/60)) $((_s%60))
+    else
+        printf '%ds' "$_s"
+    fi
 }
 
 # "item" not "file": a Keep on Device target can be a folder, and calling a
@@ -225,6 +244,10 @@ for f in "$@"; do
         done
         IFS=$_oifs
         done_n=0
+        # t0 anchors the speed/ETA: seconds since the pull began. date +%s is
+        # whole seconds — fine, because the per-file latency (~300ms) dominates
+        # and we only ever render "N/s" and a rounded ETA, never sub-second.
+        t0=$(date +%s)
         if [ "$total" -gt 0 ]; then
             progress_start "$total" \
                 "Downloading $total $(files_word "$total") from \"$(basename -- "$abs")\"…"
@@ -252,7 +275,21 @@ for f in "$@"; do
             esac
             refresh_overlay "$MOUNT/$childrel"
             done_n=$((done_n + 1))
-            progress_set "$done_n" "Downloading $done_n of $total: $(basename -- "$childrel")"
+            # Speed + ETA from the elapsed wall-clock. Guarded on elapsed>=1 so the
+            # first iteration (t0 just set) never divides by zero or shows a
+            # misleading 0/s; from then on both are a stable, glanceable number.
+            now=$(date +%s)
+            elapsed=$((now - t0))
+            if [ "$elapsed" -ge 1 ]; then
+                rate=$(( (done_n + elapsed/2) / elapsed ))   # round to nearest
+                [ "$rate" -lt 1 ] && rate=1
+                eta=$(( (total - done_n + rate/2) / rate ))
+                progress_set "$done_n" \
+                    "Downloading $done_n of $total — $(basename -- "$childrel")  ·  ${rate} files/s  ·  ~$(fmt_dur "$eta") left"
+            else
+                progress_set "$done_n" \
+                    "Downloading $done_n of $total — $(basename -- "$childrel")"
+            fi
             # Stop if the user pressed Cancel. The folder stays pinned and the
             # $pulled_files already counted stay resident; break, don't exit, so the
             # normal summary still runs and reports what came down.

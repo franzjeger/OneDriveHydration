@@ -11,6 +11,11 @@ Type=Service
 #   * disappears entirely for a mixed file+directory selection, so a mixed
 #     selection silently offers nothing rather than the wrong thing.
 MimeType=all/allfiles;
+# TopLevel (read from this [Desktop Entry] group, not the action groups): kio
+# buckets priority-less services into the "Actions" submenu, which buries these
+# two. TopLevel lifts them to the top of the context menu, where a OneDrive
+# user expects "Free Up Space" / "Keep on Device" to be.
+X-KDE-Priority=TopLevel
 Actions=onedriveHydrationFreeUpSpace;onedriveHydrationKeepOnDevice;
 
 [Desktop Action onedriveHydrationFreeUpSpace]

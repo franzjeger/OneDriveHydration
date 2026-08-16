@@ -75,12 +75,10 @@ action_dir=$data_home/onedrive-hydration
 menu_dir=$data_home/kio/servicemenus
 action=$action_dir/free-up-space.sh
 action2=$action_dir/keep-on-device.sh
+action3=$action_dir/free-up-space-folder.sh
 mkdir -p "$action_dir" "$menu_dir"
 
-# Both wrappers get the same two substitutions, in the same way, for the same
-# reason: the sync root and the CLI's absolute path are baked in because a
-# detached Dolphin action has no configuration to read them from.
-for src_dst in "free-up-space.sh.in=$action" "keep-on-device.sh.in=$action2"; do
+for src_dst in "free-up-space.sh.in=$action" "keep-on-device.sh.in=$action2" "free-up-space-folder.sh.in=$action3"; do
     src=${src_dst%%=*}
     dst=${src_dst#*=}
     sed -e "s|@MOUNT@|$mount|g" -e "s|@CTL@|$bin_dir/onedrive-hydrationctl|g" \
@@ -89,25 +87,18 @@ for src_dst in "free-up-space.sh.in=$action" "keep-on-device.sh.in=$action2"; do
     mv -f "$dst.tmp" "$dst"
 done
 
-# Two menu entries: the file one carries both actions, the folder one carries
-# only Keep on Device — Free Up Space is never offered on a directory, because
-# the daemon has no bulk evict. Each must be executable: measured on plasmashell
-# 6.7.4, a servicemenu .desktop without the bit makes Dolphin answer "You are
-# not authorized to execute this file" the moment the action is clicked — the
-# entry appears, and then cannot run. KDE trusts a servicemenu to launch a
-# process only when the file it reads it from is itself marked executable.
 for menu_pair in \
     "servicemenu.desktop.in=onedrive-hydration.desktop" \
     "servicemenu-folder.desktop.in=onedrive-hydration-folder.desktop"; do
     msrc=$here/${menu_pair%%=*}
     mdst=$menu_dir/${menu_pair#*=}
-    sed -e "s|@ACTION@|$action|g" -e "s|@ACTION2@|$action2|g" "$msrc" > "$mdst.tmp"
+    sed -e "s|@ACTION@|$action|g" -e "s|@ACTION2@|$action2|g" -e "s|@ACTION3@|$action3|g" "$msrc" > "$mdst.tmp"
     chmod 755 "$mdst.tmp"
     mv -f "$mdst.tmp" "$mdst"
 done
 
-printf 'installed:\n  %s\n  %s\n  %s/onedrive-hydration.desktop\n  %s/onedrive-hydration-folder.desktop\n' \
-    "$action" "$action2" "$menu_dir" "$menu_dir"
+printf 'installed:\n  %s\n  %s\n  %s\n  %s/onedrive-hydration.desktop\n  %s/onedrive-hydration-folder.desktop\n' \
+    "$action" "$action2" "$action3" "$menu_dir" "$menu_dir"
 printf 'sync root: %s\n' "$mount"
 
 # Measured with probes/servicemenu-match.cpp: a servicemenu dropped into the

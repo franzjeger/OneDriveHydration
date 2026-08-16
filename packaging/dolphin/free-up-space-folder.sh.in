@@ -1,0 +1,173 @@
+#!/bin/sh
+# Dolphin's "Free Up Space" action for FOLDERS: evict all resident files
+# under the selected directory back to placeholders. The daemon's evict verb
+# takes a single file, so this wrapper enumerates the directory's files and
+# evicts them one at a time, reporting the total bytes freed.
+set -u
+
+MOUNT='@MOUNT@'
+CTL='@CTL@'
+TITLE='OneDrive Hydration'
+
+# Dolphin spawns this with a minimal environment. kdialog and notify-send
+# need the session bus and runtime dir to work, so restore them.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+
+human() {
+    if command -v numfmt >/dev/null 2>&1; then
+        numfmt --to=iec-i --suffix=B -- "$1"
+    else
+        printf '%s bytes' "$1"
+    fi
+}
+
+files_word() {
+    if [ "$1" -eq 1 ]; then printf 'file'; else printf 'files'; fi
+}
+
+urlencode() {
+    _s=$1
+    _o=''
+    _old=${LC_ALL:-}
+    LC_ALL=C
+    while [ -n "$_s" ]; do
+        _c=${_s%"${_s#?}"}
+        case $_c in
+            [a-zA-Z0-9._~/-]) _o="$_o$_c" ;;
+            *) _o="$_o$(printf '%%%02X' "'$_c")" ;;
+        esac
+        _s=${_s#?}
+    done
+    LC_ALL=$_old
+    printf '%s' "$_o"
+}
+
+refresh_overlay() {
+    command -v dbus-send >/dev/null 2>&1 || return 0
+    dbus-send --session --type=signal /org/kde/KDirNotify \
+        org.kde.KDirNotify.FilesChanged "array:string:file://$(urlencode "$1")" \
+        >/dev/null 2>&1 || true
+}
+
+say() {
+    urgency=$1
+    body=$2
+    if command -v kdialog >/dev/null 2>&1; then
+        if [ "$urgency" = ok ]; then
+            kdialog --title "$TITLE" --passivepopup "$body" 7 >/dev/null 2>&1 && return 0
+        else
+            kdialog --title "$TITLE" --sorry "$body" >/dev/null 2>&1 && return 0
+        fi
+    fi
+    if command -v notify-send >/dev/null 2>&1; then
+        if [ "$urgency" = ok ]; then
+            notify-send -a "$TITLE" -i onedrive-hydration "$TITLE" "$body" >/dev/null 2>&1 && return 0
+        else
+            notify-send -u critical -a "$TITLE" -i onedrive-hydration "$TITLE" "$body" >/dev/null 2>&1 && return 0
+        fi
+    fi
+    printf '%s\n' "$body" >&2
+}
+
+[ "$#" -gt 0 ] || exit 0
+
+freed=0
+ok=0
+skipped=0
+problems=''
+
+for f in "$@"; do
+    abs=$(readlink -f -- "$f" 2>/dev/null) || abs=$f
+
+    case "$abs" in
+        "$MOUNT")
+            problems="${problems}${abs}\n    that is the sync folder itself\n"
+            continue
+            ;;
+        "$MOUNT"/*)
+            rel=${abs#"$MOUNT"/}
+            ;;
+        *)
+            problems="${problems}${abs}\n    not inside the sync folder\n"
+            continue
+            ;;
+    esac
+
+    # If it's not a directory, fall through to single-file evict.
+    if [ ! -d "$abs" ]; then
+        reply=$("$CTL" evict "$rel" 2>&1) || true
+        case "$reply" in
+            "reclaimed "*" bytes")
+                n=${reply#reclaimed }
+                n=${n% bytes}
+                case "$n" in '' | *[!0-9]*) n=0 ;; esac
+                freed=$((freed + n))
+                ok=$((ok + 1))
+                ;;
+            *)
+                skipped=$((skipped + 1))
+                ;;
+        esac
+        refresh_overlay "$abs"
+        continue
+    fi
+
+    # Free Up Space on a folder is the inverse of Keep on Device on it: a folder
+    # the user kept is pinned, and the daemon refuses to evict any file under a
+    # pinned ancestor (`kept: Pinned { via: "<folder>" }`). So release the
+    # folder's pin first — unpinning a folder that was never pinned is a harmless
+    # refusal we ignore — then the per-file evicts below succeed. Without this the
+    # wrapper would count every file as "skipped" and free nothing, the "Free Up
+    # Space did nothing" the user saw on a kept folder.
+    "$CTL" unpin "$rel" >/dev/null 2>&1 || true
+
+    # Directory: enumerate all regular files and evict each one.
+    # We only evict files that are NOT already dehydrated (no point evicting
+    # a placeholder), and we skip the framework's own internal files.
+    total=0
+    while IFS= read -r child; do
+        [ -n "$child" ] || continue
+        total=$((total + 1))
+        childrel="${child#"$MOUNT"/}"
+        reply=$("$CTL" evict "$childrel" 2>&1) || true
+        case "$reply" in
+            "reclaimed "*" bytes")
+                n=${reply#reclaimed }
+                n=${n% bytes}
+                case "$n" in '' | *[!0-9]*) n=0 ;; esac
+                freed=$((freed + n))
+                ok=$((ok + 1))
+                ;;
+            "kept:"*)
+                skipped=$((skipped + 1))
+                ;;
+            *)
+                skipped=$((skipped + 1))
+                ;;
+        esac
+        refresh_overlay "$child"
+    done <<EOF
+$(find "$abs" -type f \
+    ! -name '.hydration-*' \
+    ! -name '.onedrive-*' \
+    2>/dev/null)
+EOF
+
+    # Refresh the directory itself so its overlay badge updates.
+    refresh_overlay "$abs"
+done
+
+if [ "$ok" -gt 0 ]; then
+    msg="Freed $(human "$freed") from $ok $(files_word "$ok")."
+    if [ "$skipped" -gt 0 ]; then
+        msg="$msg $skipped $(files_word "$skipped") already cloud-only or kept."
+    fi
+    say ok "$msg"
+else
+    if [ "$skipped" -gt 0 ]; then
+        say ok "Nothing to free — $skipped $(files_word "$skipped") were already cloud-only or kept on device."
+    else
+        say problem "Nothing was freed."
+    fi
+fi

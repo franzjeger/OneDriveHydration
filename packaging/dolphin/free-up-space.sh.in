@@ -11,6 +11,11 @@ MOUNT='@MOUNT@'
 CTL='@CTL@'
 TITLE='OneDrive Hydration'
 
+# Dolphin spawns this with a minimal environment. kdialog and notify-send
+# need the session bus and runtime dir to work, so restore them.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+
 human() {
     # iec-i, not iec: the daemon counts bytes, and `--to=iec` would render
     # 8192 as "8.0KB" — a decimal-looking label on a binary quantity.
