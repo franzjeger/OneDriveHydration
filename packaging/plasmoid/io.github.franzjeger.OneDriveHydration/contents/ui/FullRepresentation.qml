@@ -80,11 +80,28 @@ ColumnLayout {
         Layout.fillWidth: true
 
         PlasmaComponents3.Label {
-            text: "Waiting to upload:"
+            text: full.host.unsent > 0 ? "Uploading:" : "Waiting to upload:"
             opacity: 0.75
         }
         PlasmaComponents3.Label {
-            text: full.host.count(full.host.unsent, "change", "changes")
+            text: full.host.unsent > 0
+                ? (full.host.count(full.host.unsent, "file", "files") + " left")
+                : full.host.count(full.host.unsent, "change", "changes")
+        }
+
+        // A real progress bar while data is actually going up. It spans both
+        // columns and collapses when idle (unsent is 0). Value is how far the
+        // current batch has come: the peak unsent since it was last zero is the
+        // denominator, so it fills from empty to full as the queue drains. A
+        // moving bar is the "yes, something is happening" the bare count never
+        // gave; a still bar at partial fill is "queued, working on it".
+        PlasmaComponents3.ProgressBar {
+            Layout.columnSpan: 2
+            Layout.fillWidth: true
+            visible: full.host.unsent > 0
+            from: 0
+            to: 1
+            value: full.host.unsentPeak > 0 ? (full.host.unsentPeak - full.host.unsent) / full.host.unsentPeak : 0
         }
 
         PlasmaComponents3.Label {

@@ -112,6 +112,15 @@ fn the_flyout_dials_the_surface_this_crate_serves() {
         "the flyout must subscribe to IndexingChanged, not poll"
     );
     assert!(qml.contains("properties.Indexing"));
+    // The upload progress bar and the peak it measures against.
+    assert!(
+        read("contents/ui/FullRepresentation.qml").contains("PlasmaComponents3.ProgressBar"),
+        "the flyout must show an upload progress bar"
+    );
+    assert!(
+        qml.contains("unsentPeak"),
+        "the bar needs a batch high-water denominator"
+    );
     // The documented complement to the signal: one cold read of all the
     // properties when the service (re)appears.
     assert!(qml.contains("\"GetAll\""));
