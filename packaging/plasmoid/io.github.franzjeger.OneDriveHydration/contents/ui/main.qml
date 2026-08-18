@@ -62,6 +62,10 @@ PlasmoidItem {
     // *quoted* in that case, never presented as current.
     property bool daemonRunning: false
     property double unsent: 0
+    // The high-water mark of unsent since it was last zero — the denominator for
+    // the flyout's upload progress bar, so a fresh batch starts empty and fills to
+    // full as it uploads. Reset to 0 in applyState whenever unsent reaches 0.
+    property double unsentPeak: 0
     property double excluded: 0
     property double exposures: 0
     // Fetches the client is serving right now, from the Downloading property and
@@ -263,6 +267,14 @@ PlasmoidItem {
         root.stateGeneration += 1;
         root.daemonRunning = daemonRunning;
         root.unsent = unsent;
+        // Track the batch high-water mark for the upload bar: grow it with unsent,
+        // reset to zero when the queue drains, so the bar measures the CURRENT
+        // upload rather than all of history. A fresh batch then starts near empty
+        // and fills to full as the count falls.
+        if (unsent > root.unsentPeak)
+            root.unsentPeak = unsent;
+        else if (unsent === 0)
+            root.unsentPeak = 0;
         root.excluded = excluded;
         root.exposures = exposures;
         root.stateKnown = true;
