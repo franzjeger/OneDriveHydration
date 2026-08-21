@@ -25,9 +25,10 @@ with no data-only path. It is not ready for user data.
 
 Namespace correctness, not desktop polish, is the release blocker. The pinned HydrationAPI
 revision gives same-folder file rename, atomic-save identity and conditional deletion an
-explicit contract. Cross-folder local moves and local folder operations remain unsupported.
-Product-shell feature work is frozen until the blocking rows in the
-[sync correctness gate](docs/SYNC-ACCEPTANCE.md) pass against a dedicated test tenant.
+explicit contract. Cross-folder local moves and local folder operations now also have
+fail-closed implementations and adversarial tests, but they still need the live validation
+required by the [sync correctness gate](docs/SYNC-ACCEPTANCE.md). Product-shell feature work
+is frozen until those blocking rows pass against a dedicated test tenant.
 
 ## Design rules
 

@@ -21,11 +21,11 @@ Documentation=https://github.com/franzjeger/HydrationAPI
 # deployment held 145,710 of them).
 RequiresMountsFor=@MOUNT@
 
-# Started by hydrationd.path when the sync daemon's socket appears, and it exits
-# as soon as that peer goes away — there is no in-process reconnect. The
-# restarts between a client restart and its socket being rebound would trip
-# systemd's default rate limit (5 in 10s) and leave the unit dead, which is the
-# one state this deployment must not reach quietly.
+# Started by hydrationd.path when the sync daemon's socket appears. The helper
+# reconnects in-process across an ordinary client restart, re-checking the
+# peer's uid on every connection. If the client stays gone past the helper's
+# bounded recovery window, the helper detaches the mount and exits; the restart
+# below then brings the mount back only after a peer can be reached again.
 StartLimitIntervalSec=0
 
 [Service]

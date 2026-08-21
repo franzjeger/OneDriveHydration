@@ -18,17 +18,20 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+      - name: Resolve the HydrationAPI revision locked by the product
+        id: hydration_api
+        run: echo "rev=$(tools/hydration-api-rev.sh)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v5
         with:
           repository: franzjeger/HydrationAPI
-          ref: b97fceb927bd614529e10245444a419151dfd5af
+          ref: ${{ steps.hydration_api.outputs.rev }}
           path: .upstream/hydration-api
       - uses: dtolnay/rust-toolchain@1.85
       - name: Install Secret Service build dependency
         run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev pkg-config
       - name: Build product binaries
         run: cargo build --release --locked --workspace
-      - name: Build revision-matched privileged helper
+      - name: Build the locked-revision privileged helper
         working-directory: .upstream/hydration-api
         run: cargo build --release --locked -p hydrationd --bin hydrationd
       - name: Verify the complete payload

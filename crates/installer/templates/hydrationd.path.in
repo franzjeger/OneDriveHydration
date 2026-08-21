@@ -19,8 +19,9 @@
 # and every restart is a window with the mount up and no helper answering, which
 # is a window of zeros.
 #
-# So: start the helper, once, when the socket appears. Re-pairing after a client
-# restart is not handled here; `systemctl restart hydrationd` is.
+# So: start the helper, once, when the socket appears. Re-pairing after an
+# ordinary client restart is handled inside hydrationd; this path unit remains
+# only the initial trigger.
 [Unit]
 Description=Watch for the OneDrive sync daemon's socket
 Documentation=https://github.com/franzjeger/OneDriveHydration
