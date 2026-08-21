@@ -235,36 +235,63 @@ fn the_keep_on_device_wrapper_never_opens_the_file() {
 }
 
 #[test]
-fn the_folder_entry_matches_directories_and_only_keep_on_device() {
+fn the_folder_entry_matches_directories_and_serves_both_actions() {
     let desktop = read("servicemenu-folder.desktop.in");
     assert_eq!(keyed(&desktop, "Type=").as_deref(), Some("Service"));
 
     // inode/directory, measured with probes/servicemenu-match.cpp on KIO 6.28:
     // reaches a directory, NOT a regular file (so it never doubles the file
-    // entry's Keep on Device), survives a multi-directory selection, and matches
-    // nothing for a mixed file+directory selection.
+    // entry), survives a multi-directory selection, and matches nothing for a
+    // mixed file+directory selection.
     assert_eq!(
         keyed(&desktop, "MimeType=").as_deref(),
         Some("inode/directory;")
     );
 
-    // Only Keep on Device — Free Up Space is never offered on a folder, because
-    // the daemon has no bulk evict.
+    // Both actions, both registered in the shared entry. The folder-specific
+    // Free Up Space uses the third wrapper (free-up-space-folder.sh.in),
+    // distinguished from the file one so the loop is bounded by the folder
+    // rather than by a single file.
     let actions = keyed(&desktop, "Actions=").expect("Actions= must be present");
     assert!(
-        actions.contains("onedriveHydrationKeepOnDevice"),
-        "{actions}"
+        actions.contains("onedriveHydrationFreeUpSpace"),
+        "the folder Free Up Space action is not registered: {actions}"
     );
     assert!(
-        !actions.contains("FreeUpSpace"),
-        "Free Up Space must not reach a directory: {actions}"
+        actions.contains("onedriveHydrationKeepOnDevice"),
+        "the folder Keep on Device action is not registered: {actions}"
     );
 
-    // The same wrapper the file entry names (@ACTION2@), same %F contract.
-    let exec = keyed(&desktop, "Exec=").expect("the folder action needs an Exec");
+    // Each action on its own block: own Name, own wrapper (@ACTION3@ / @ACTION2@),
+    // same %F contract, same app icon as the file entry.
+    let free_block = desktop
+        .split("[Desktop Action onedriveHydrationFreeUpSpace]")
+        .nth(1)
+        .expect("the Free Up Space action block is missing");
+    assert_eq!(keyed(free_block, "Name=").as_deref(), Some("Free Up Space"));
+    let exec = keyed(free_block, "Exec=").expect("Free Up Space needs an Exec");
     assert!(exec.ends_with(" %F"), "{exec}");
-    assert!(exec.contains("@ACTION2@"), "{exec}");
-    assert_eq!(keyed(&desktop, "Icon=").as_deref(), Some(ICON_APP));
+    assert!(
+        exec.contains("@ACTION3@"),
+        "the folder-specific wrapper is substituted: {exec}"
+    );
+    assert_eq!(keyed(free_block, "Icon=").as_deref(), Some(ICON_APP));
+
+    let keep_block = desktop
+        .split("[Desktop Action onedriveHydrationKeepOnDevice]")
+        .nth(1)
+        .expect("the Keep on Device action block is missing");
+    assert_eq!(
+        keyed(keep_block, "Name=").as_deref(),
+        Some("Keep on Device")
+    );
+    let exec = keyed(keep_block, "Exec=").expect("Keep on Device needs an Exec");
+    assert!(exec.ends_with(" %F"), "{exec}");
+    assert!(
+        exec.contains("@ACTION2@"),
+        "the shared wrapper is substituted: {exec}"
+    );
+    assert_eq!(keyed(keep_block, "Icon=").as_deref(), Some(ICON_APP));
 }
 
 #[test]
