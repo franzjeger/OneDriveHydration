@@ -17,11 +17,11 @@ jobs:
   package-payload:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Resolve the HydrationAPI revision locked by the product
         id: hydration_api
         run: echo "rev=$(tools/hydration-api-rev.sh)" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: franzjeger/HydrationAPI
           ref: ${{ steps.hydration_api.outputs.rev }}
@@ -46,7 +46,7 @@ jobs:
   supply-chain:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   # The installer's refusals, fired against the real binary on a real machine.
@@ -61,7 +61,7 @@ jobs:
   installer-smoke:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.85
       - name: Build the installer
         run: cargo build --locked -p onedrive-hydration-install
@@ -120,7 +120,7 @@ jobs:
   msrv:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.85
       - name: Install Secret Service build dependency
         run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev pkg-config
@@ -129,7 +129,7 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -160,7 +160,7 @@ jobs:
     # breakage this job exists for.
     container: fedora:41
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install the KF6 build toolchain
         # No sudo: the container runs as root. If a package name is wrong for
         # this Fedora, dnf fails loudly here rather than skipping the build.
