@@ -24,9 +24,9 @@ rows still require their corresponding live result before release.
 | Local atomic-save replacement | Yes | Required | Candidate |
 | Local file delete with recorded cTag | Yes | Required | Candidate |
 | Local same-folder file rename | Yes | Required | Candidate |
-| Local file move to another folder | Refuses safely | No | Blocking |
-| Empty folder in either direction | No | No | Blocking |
-| Local folder create/rename/move/delete | Refuses or retains cloud data | No | Blocking |
+| Local file move to another folder | Yes | Required | Candidate |
+| Empty folder in either direction | Yes | Required | Candidate |
+| Local folder create/rename/move/delete | Yes | Required | Candidate |
 | Two-device edit, rename and delete conflicts | Partial | Required | Blocking |
 | Restart during fetch/upload/delta apply | Partial | Required | Blocking |
 
@@ -87,9 +87,10 @@ settle, restart both daemon halves, and verify the result again.
    delete a version neither client observed.
 9. Trigger throttling and transient 5xx responses. Pending work must remain
    visible, retry with bounded backoff, and retain every precondition.
-10. Move or rename a folder and create an empty folder. Until the blocking rows
-    above are implemented, the client must report the limitation and leave
-    cloud data intact; it must not claim “up to date”.
+10. Move or rename a folder and create an empty folder in each direction.
+     Verify that the folder identity follows the rename, that the empty folder
+     appears on the other side, and that deleting a non-empty folder on one
+     side retains the local (and cloud) content rather than erasing it.
 
 ## Release rule
 

@@ -33,10 +33,10 @@
 - [x] Propagate same-folder file rename as a conditional item-ID operation
 - [x] Carry the recorded cTag into local deletion
 - [x] Pair split rename events before drawing a destructive conclusion
-- [ ] Give local folders durable cloud identity
-- [ ] Create and retain empty folders in both directions
-- [ ] Move files between parents by destination folder ID
-- [ ] Implement guarded local folder create, rename, move and delete
+- [x] Give local folders durable cloud identity
+- [x] Create and retain empty folders in both directions
+- [x] Move files between parents by destination folder ID
+- [x] Implement guarded local folder create, rename, move and delete
 - [ ] Pass the two-device conflict and process-restart matrix in
       [the sync correctness gate](SYNC-ACCEPTANCE.md)
 - [ ] Pass the complete matrix against a dedicated non-production tenant
