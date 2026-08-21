@@ -74,7 +74,7 @@ pub const RETRY_CEILING: Duration = Duration::from_secs(30);
 /// The counters keep their last-seen values while `daemon_running` is false.
 /// That is deliberate: a tray decides "not running" from the flag alone, and
 /// zeroing the counters would manufacture a state line the daemon never sent.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DaemonState {
     /// The control socket currently accepts and answers.
     pub daemon_running: bool,
@@ -93,6 +93,11 @@ pub struct DaemonState {
     /// product's "Indexing…". A first sync or a large cloud change is when a user
     /// most wants a sign the daemon is working rather than stuck.
     pub indexing: bool,
+    /// The relative paths of uploads in flight right now — the framework's
+    /// watch-line `uploading` key, surfaced as the plasmoid's per-file
+    /// "Uploading" list. Empty when nothing is being sent. Not `Copy` (a
+    /// `Vec`), so `DaemonState` is cloned rather than copied at its move sites.
+    pub uploading: Vec<String>,
 }
 
 /// Fold one `watch` state line into `state`. Returns whether the line carried
@@ -106,7 +111,16 @@ pub struct DaemonState {
 /// half-applied line is still better than a dead watch connection.
 pub fn apply_state_line(line: &str, state: &mut DaemonState) -> bool {
     let mut recognized = false;
-    for token in line.split_whitespace() {
+    // `uploading` is the one key whose value is not a `<u64>`: a space-joined
+    // list of escaped paths. It is also the newest key, so it is always the
+    // last token on the line — which is what makes it possible to parse here
+    // at all, because `split_whitespace` would otherwise split the value into
+    // fragments. Everything before it is the usual `key=<u64>` tokens.
+    let (head, uploading) = match line.rsplit_once(" uploading=") {
+        Some((head, value)) => (head, Some(value)),
+        None => (line, None),
+    };
+    for token in head.split_whitespace() {
         let Some((key, value)) = token.split_once('=') else {
             continue;
         };
@@ -123,6 +137,20 @@ pub fn apply_state_line(line: &str, state: &mut DaemonState) -> bool {
             "scanning" => state.indexing = value != 0,
             _ => continue,
         }
+        recognized = true;
+    }
+    if let Some(value) = uploading {
+        // Empty value means "nothing is being sent" — the daemon writes the
+        // key with no paths rather than omitting it, so an empty list is a
+        // recognised state, not an absent one.
+        state.uploading = if value.is_empty() {
+            Vec::new()
+        } else {
+            value
+                .split(' ')
+                .map(hydration_client::wire::decode_path)
+                .collect()
+        };
         recognized = true;
     }
     recognized
@@ -166,7 +194,7 @@ fn watch_once(
         if apply_state_line(&line, state) {
             state.daemon_running = true;
             saw_state_line = true;
-            on_state(*state);
+            on_state(state.clone());
         }
     }
     saw_state_line
@@ -197,13 +225,13 @@ pub fn watch_daemon(
     while keep_going() {
         let mut publish_distinct = |s: DaemonState| {
             if s != last_published {
-                last_published = s;
+                last_published = s.clone();
                 publish(s);
             }
         };
         let saw_state_line = watch_once(socket, &mut state, &mut publish_distinct);
         state.daemon_running = false;
-        publish_distinct(state);
+        publish_distinct(state.clone());
         // Reset only when the daemon actually spoke the protocol. A socket
         // that accepts but never sends a state line — a daemon at its
         // watcher cap refusing with a bare EOF, or one wedged at startup —
@@ -480,6 +508,16 @@ impl ControlSurface {
         self.state.indexing
     }
 
+    /// The relative paths of uploads in flight right now — the plasmoid's
+    /// per-file "Uploading" list. A `str[]`, empty when nothing is being sent.
+    /// A separate property (and its own PropertiesChanged) from the `Unsent`
+    /// count, so a state that only gains or loses a file in flight does not
+    /// flap the counter.
+    #[zbus(property)]
+    fn uploading(&self) -> Vec<String> {
+        self.state.uploading.clone()
+    }
+
     /// The daemon's sign-in conclusion: `"healthy"`, `"unsaved"` (signed in
     /// and syncing, but the rotated credential cannot be written to Secret
     /// Service), `"rejected"` (the service has conclusively refused the
@@ -583,6 +621,20 @@ impl ControlSurface {
     /// already generates an `indexing_changed` emitter for `PropertiesChanged`.)
     #[zbus(signal, name = "IndexingChanged")]
     pub async fn index_changed(emitter: &SignalEmitter<'_>, indexing: bool) -> zbus::Result<()>;
+
+    /// Fired when the set of in-flight uploads changes, carrying it, so a
+    /// subscriber never needs a follow-up read. A new signal rather than a
+    /// `StateChanged` argument, for the same reason `DownloadChanged` is:
+    /// existing subscribers deserialize `StateChanged` by its exact
+    /// `(bool,u64,u64,u64)` signature and would silently drop a grown one. (The
+    /// Rust name differs from the wire name because the `uploading` property
+    /// already generates an `uploading_changed` emitter for
+    /// `PropertiesChanged`.)
+    #[zbus(signal, name = "ActiveUploadsChanged")]
+    pub async fn active_uploads_changed(
+        emitter: &SignalEmitter<'_>,
+        uploading: Vec<String>,
+    ) -> zbus::Result<()>;
 }
 
 /// Push a new state into a served [`ControlSurface`]: update the properties,
@@ -617,46 +669,56 @@ pub fn publish_state(
     state: DaemonState,
 ) -> zbus::Result<()> {
     let mut surface = iface.get_mut();
-    let previous = surface.state;
+    let previous = surface.state.clone();
+    // `uploading` is a `Vec`, not `Copy`, so the move into `surface.state`
+    // would take it with it; capture the fields the async block needs first.
+    let uploading = state.uploading.clone();
+    let (daemon_running, unsent, excluded, exposures, downloading, indexing) = (
+        state.daemon_running,
+        state.unsent,
+        state.excluded,
+        state.exposures,
+        state.downloading,
+        state.indexing,
+    );
     surface.state = state;
     let emitter = iface.signal_emitter();
     zbus::block_on(async {
-        if previous.daemon_running != state.daemon_running {
+        if previous.daemon_running != daemon_running {
             surface.daemon_running_changed(emitter).await?;
         }
-        if previous.unsent != state.unsent {
+        if previous.unsent != unsent {
             surface.unsent_changed(emitter).await?;
         }
-        if previous.excluded != state.excluded {
+        if previous.excluded != excluded {
             surface.excluded_changed(emitter).await?;
         }
-        if previous.exposures != state.exposures {
+        if previous.exposures != exposures {
             surface.exposures_changed(emitter).await?;
         }
-        if previous.downloading != state.downloading {
+        if previous.downloading != downloading {
             surface.downloading_changed(emitter).await?;
         }
-        if previous.indexing != state.indexing {
+        if previous.indexing != indexing {
             surface.indexing_changed(emitter).await?;
+        }
+        if previous.uploading != uploading {
+            surface.uploading_changed(emitter).await?;
         }
         // StateChanged keeps its pinned (bool,u64,u64,u64) shape and fires once
         // per distinct state, as before — downloading is deliberately not one of
         // its arguments. It rides its own DownloadChanged instead, emitted only
         // when it actually moved, so a state that differs only in an unsent count
         // does not also flap the download signal.
-        ControlSurface::state_changed(
-            emitter,
-            state.daemon_running,
-            state.unsent,
-            state.excluded,
-            state.exposures,
-        )
-        .await?;
-        if previous.downloading != state.downloading {
-            ControlSurface::download_changed(emitter, state.downloading).await?;
+        ControlSurface::state_changed(emitter, daemon_running, unsent, excluded, exposures).await?;
+        if previous.downloading != downloading {
+            ControlSurface::download_changed(emitter, downloading).await?;
         }
-        if previous.indexing != state.indexing {
-            ControlSurface::index_changed(emitter, state.indexing).await?;
+        if previous.indexing != indexing {
+            ControlSurface::index_changed(emitter, indexing).await?;
+        }
+        if previous.uploading != uploading {
+            ControlSurface::active_uploads_changed(emitter, uploading).await?;
         }
         Ok(())
     })
@@ -684,6 +746,7 @@ mod tests {
                 exposures: 1,
                 downloading: 1,
                 indexing: false,
+                uploading: Vec::new(),
             }
         );
         // A later line may carry fewer keys; the missing ones keep their
@@ -691,6 +754,39 @@ mod tests {
         assert!(apply_state_line("unsent=2", &mut state));
         assert_eq!(state.unsent, 2);
         assert_eq!(state.excluded, 10);
+    }
+
+    #[test]
+    fn the_uploading_key_carrys_a_list_of_paths() {
+        let mut state = DaemonState::default();
+        // Empty value: the key is present but nothing is being sent.
+        assert!(apply_state_line(
+            "unsent=1 excluded=0 exposures=0 downloading=0 scanning=0 uploading=",
+            &mut state
+        ));
+        assert!(state.uploading.is_empty());
+        // One path.
+        assert!(apply_state_line(
+            "unsent=1 excluded=0 exposures=0 downloading=0 scanning=0 uploading=Documents/report.docx",
+            &mut state
+        ));
+        assert_eq!(state.uploading, vec!["Documents/report.docx".to_owned()]);
+        // Several paths, and the escape scheme round-trips: a space in a path
+        // is `\s`, so the token splits on real spaces only.
+        assert!(apply_state_line(
+            "unsent=2 excluded=0 exposures=0 downloading=0 scanning=0 uploading=a\\sfile.txt b=c.txt",
+            &mut state
+        ));
+        assert_eq!(
+            state.uploading,
+            vec!["a file.txt".to_owned(), "b=c.txt".to_owned()]
+        );
+        // A line without the key at all leaves the list untouched.
+        assert!(apply_state_line("unsent=9", &mut state));
+        assert_eq!(
+            state.uploading,
+            vec!["a file.txt".to_owned(), "b=c.txt".to_owned()]
+        );
     }
 
     #[test]
@@ -811,6 +907,7 @@ mod tests {
             // published state keeps the default zero.
             downloading: 0,
             indexing: false,
+            uploading: Vec::new(),
         };
         assert_eq!(
             published,

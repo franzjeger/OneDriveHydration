@@ -91,6 +91,7 @@ fn properties_update_and_state_changed_fires_once_per_publish() {
             exposures: 1,
             downloading: 0,
             indexing: false,
+            uploading: Vec::new(),
         },
     )
     .unwrap();
@@ -149,6 +150,7 @@ fn credential_state_is_a_property_and_a_signal_of_its_own() {
             exposures: 0,
             downloading: 0,
             indexing: false,
+            uploading: Vec::new(),
         },
     )
     .unwrap();
@@ -179,6 +181,7 @@ fn download_count_is_a_property_and_a_signal_of_its_own() {
                 exposures: 0,
                 downloading,
                 indexing: false,
+                uploading: Vec::new(),
             },
         )
         .unwrap();
@@ -235,6 +238,7 @@ fn indexing_is_a_property_and_a_signal_of_its_own() {
                 exposures: 0,
                 downloading: 0,
                 indexing,
+                uploading: Vec::new(),
             },
         )
         .unwrap();
@@ -260,6 +264,71 @@ fn indexing_is_a_property_and_a_signal_of_its_own() {
         "the second IndexingChanged is the true->false stop; the unsent-only publish fired none"
     );
     assert!(!proxy.get_property::<bool>("Indexing").unwrap());
+}
+
+#[test]
+fn the_upload_list_is_a_property_and_a_signal_of_its_own() {
+    let (server, client) = served_pair(ControlSurface::new(PathBuf::from("/nonexistent"), None));
+    let proxy = tray_proxy(&client);
+    assert_eq!(
+        proxy.get_property::<Vec<String>>("Uploading").unwrap(),
+        Vec::<String>::new()
+    );
+
+    let mut uploads = proxy.receive_signal("ActiveUploadsChanged").unwrap();
+    let mut states = proxy.receive_signal("StateChanged").unwrap();
+    let iface = server
+        .object_server()
+        .interface::<_, ControlSurface>(OBJECT_PATH)
+        .unwrap();
+    let publish = |unsent, uploading| {
+        publish_state(
+            &iface,
+            DaemonState {
+                daemon_running: true,
+                unsent,
+                excluded: 0,
+                exposures: 0,
+                downloading: 0,
+                indexing: false,
+                uploading,
+            },
+        )
+        .unwrap();
+    };
+
+    // A batch starts: ActiveUploadsChanged carries the paths and the property
+    // fills — and, like DownloadChanged and IndexingChanged, it is its own
+    // signal, not an argument grown onto StateChanged's pinned (bool,u64,u64,u64).
+    publish(2, vec!["a.txt".to_owned(), "b.txt".to_owned()]);
+    let u: (Vec<String>,) = uploads.next().unwrap().body().deserialize().unwrap();
+    assert_eq!(u, (vec!["a.txt".to_owned(), "b.txt".to_owned()],));
+    let s: (bool, u64, u64, u64) = states.next().unwrap().body().deserialize().unwrap();
+    assert_eq!(
+        s,
+        (true, 2, 0, 0),
+        "StateChanged keeps its four-argument shape"
+    );
+    assert_eq!(
+        proxy.get_property::<Vec<String>>("Uploading").unwrap(),
+        vec!["a.txt".to_owned(), "b.txt".to_owned()]
+    );
+
+    // A counter-only move fires no ActiveUploadsChanged; the next one is the
+    // list draining to empty, so its value being empty (not a repeat) proves the
+    // unsent-only publish in between flapped no upload signal.
+    publish(1, vec!["a.txt".to_owned(), "b.txt".to_owned()]); // unsent moved, list unchanged
+    publish(0, Vec::new()); // batch done
+    let u: (Vec<String>,) = uploads.next().unwrap().body().deserialize().unwrap();
+    assert_eq!(
+        u,
+        (Vec::new(),),
+        "the second ActiveUploadsChanged is the drain to empty; the unsent-only publish fired none"
+    );
+    assert_eq!(
+        proxy.get_property::<Vec<String>>("Uploading").unwrap(),
+        Vec::<String>::new()
+    );
 }
 
 #[test]

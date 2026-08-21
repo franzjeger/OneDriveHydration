@@ -142,6 +142,39 @@ ColumnLayout {
         }
     }
 
+    // The per-file upload list: which files are going up right now, not just
+    // how many. Shown only while the daemon runs and the list is non-empty —
+    // the same "counters only while the daemon runs" rule as the grid above,
+    // and collapsed to nothing when empty rather than leaving a blank line.
+    // Relative paths, exactly as the daemon sent them; the sync root is not
+    // prepended because the folder is the obvious context.
+    ColumnLayout {
+        id: uploadList
+        visible: full.host.stateKnown
+            && full.host.daemonRunning
+            && full.host.activeUploads.length > 0
+        Layout.fillWidth: true
+        spacing: Kirigami.Units.smallSpacing
+
+        PlasmaComponents3.Label {
+            text: full.host.count(full.host.activeUploads.length, "file is", "files are") + " uploading now:"
+            opacity: 0.75
+            Layout.fillWidth: true
+        }
+
+        Repeater {
+            model: full.host.activeUploads
+            delegate: PlasmaComponents3.Label {
+                text: modelData
+                elide: Text.ElideMiddle
+                Layout.fillWidth: true
+                Layout.maximumWidth: full.width
+                font.italic: true
+                opacity: 0.9
+            }
+        }
+    }
+
     // Indeterminate progress bar: shown while the daemon is actively
     // downloading files (Downloading > 0) or applying a cloud delta
     // (Indexing == true). Mirrors the OneDrive tray's spinning indicator.

@@ -798,6 +798,11 @@ fn read_service_state(connection: &zbus::blocking::Connection) -> Option<DaemonS
         // Same: the tray icon does not distinguish an indexing state; the
         // plasmoid's "Indexing…" row reads the Indexing property directly.
         indexing: false,
+        // The tray icon shows no per-file list; the plasmoid reads the
+        // Uploading property directly. Left empty here rather than read, which
+        // would make the whole cold read fail against a daemon too old to have
+        // the property.
+        uploading: Vec::new(),
     })
 }
 
@@ -939,6 +944,10 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
                         // Same for indexing — its own IndexingChanged signal, and
                         // the tray does not show it either.
                         indexing: false,
+                        // Same for the per-file list — its own
+                        // ActiveUploadsChanged signal, and the tray does not show
+                        // it.
+                        uploading: Vec::new(),
                     }))
                     .is_err()
                 {
@@ -1002,7 +1011,7 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
     // itself goes away.
     let mut daemon_state = read_service_state(&connection);
     let mut credential = read_credential_state(&connection);
-    apply_presentation(&sni, &menu, &present(daemon_state, credential))
+    apply_presentation(&sni, &menu, &present(daemon_state.clone(), credential))
         .map_err(io::Error::other)?;
 
     // Register only now, with the objects served and current: a watcher that
@@ -1026,25 +1035,25 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
         match event_queue.recv() {
             Ok(TrayEvent::State(state)) => {
                 daemon_state = Some(state);
-                apply_presentation(&sni, &menu, &present(daemon_state, credential))
+                apply_presentation(&sni, &menu, &present(daemon_state.clone(), credential))
                     .map_err(io::Error::other)?;
             }
             Ok(TrayEvent::Credential(state)) => {
                 credential = state;
-                apply_presentation(&sni, &menu, &present(daemon_state, credential))
+                apply_presentation(&sni, &menu, &present(daemon_state.clone(), credential))
                     .map_err(io::Error::other)?;
             }
             Ok(TrayEvent::ServiceGone) => {
                 // Nothing the service asserted survives it leaving the bus.
                 daemon_state = None;
                 credential = CredentialState::Unknown;
-                apply_presentation(&sni, &menu, &present(daemon_state, credential))
+                apply_presentation(&sni, &menu, &present(daemon_state.clone(), credential))
                     .map_err(io::Error::other)?;
             }
             Ok(TrayEvent::ServiceReturned) => {
                 daemon_state = read_service_state(&connection);
                 credential = read_credential_state(&connection);
-                apply_presentation(&sni, &menu, &present(daemon_state, credential))
+                apply_presentation(&sni, &menu, &present(daemon_state.clone(), credential))
                     .map_err(io::Error::other)?;
             }
             Ok(TrayEvent::WatcherReturned) => {
@@ -1082,6 +1091,7 @@ mod tests {
             exposures,
             downloading: 0,
             indexing: false,
+            uploading: Vec::new(),
         }
     }
 
@@ -1242,7 +1252,7 @@ mod tests {
             state(true, 2, 0, 0), // unsent
             state(true, 0, 0, 1), // exposed
         ] {
-            let plain = present(Some(base), CredentialState::Healthy);
+            let plain = present(Some(base.clone()), CredentialState::Healthy);
             let unsaved = present(Some(base), CredentialState::Unsaved);
             assert_eq!(
                 plain.headline, unsaved.headline,
@@ -1283,7 +1293,7 @@ mod tests {
             Some(state(true, 0, 0, 2)),
         ] {
             assert_eq!(
-                present(base, CredentialState::Unknown),
+                present(base.clone(), CredentialState::Unknown),
                 present(base, CredentialState::Healthy)
             );
         }

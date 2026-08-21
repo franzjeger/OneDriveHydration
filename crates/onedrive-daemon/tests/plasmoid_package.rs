@@ -39,6 +39,7 @@ fn state(daemon_running: bool, unsent: u64, excluded: u64, exposures: u64) -> Da
         exposures,
         downloading: 0,
         indexing: false,
+        uploading: Vec::new(),
     }
 }
 
@@ -112,6 +113,13 @@ fn the_flyout_dials_the_surface_this_crate_serves() {
         "the flyout must subscribe to IndexingChanged, not poll"
     );
     assert!(qml.contains("properties.Indexing"));
+    // The per-file upload list rides its own member and property in the same
+    // shape — subscribed, not polled, and part of the cold read.
+    assert!(
+        qml.contains("function dbusActiveUploadsChanged("),
+        "the flyout must subscribe to ActiveUploadsChanged, not poll"
+    );
+    assert!(qml.contains("properties.Uploading"));
     // The upload progress bar and the peak it measures against.
     assert!(
         read("contents/ui/FullRepresentation.qml").contains("PlasmaComponents3.ProgressBar"),
@@ -120,6 +128,12 @@ fn the_flyout_dials_the_surface_this_crate_serves() {
     assert!(
         qml.contains("unsentPeak"),
         "the bar needs a batch high-water denominator"
+    );
+    // The per-file list is not just subscribed to: the flyout page must render
+    // it, or the property would be dead state.
+    assert!(
+        read("contents/ui/FullRepresentation.qml").contains("activeUploads"),
+        "the flyout must show the per-file upload list"
     );
     // The documented complement to the signal: one cold read of all the
     // properties when the service (re)appears.

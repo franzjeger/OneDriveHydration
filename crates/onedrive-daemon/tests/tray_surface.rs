@@ -141,6 +141,7 @@ impl StateService {
                 exposures,
                 downloading: 0,
                 indexing: false,
+                uploading: Vec::new(),
             },
         )
         .unwrap();

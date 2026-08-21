@@ -79,6 +79,13 @@ PlasmoidItem {
     // shown as indexing (u64(undefined)/false).
     property bool indexing: false
 
+    // The files the daemon is sending to OneDrive right now, as relative paths —
+    // the flyout's per-file "Uploading" list. Its own Uploading property and
+    // ActiveUploadsChanged signal, the same pattern as downloading; a service
+    // too old to expose it answers undefined, which normalizes to an empty list
+    // and the row simply does not appear.
+    property var activeUploads: []
+
     // The daemon's sign-in conclusion, from the CredentialState property and
     // the CredentialStateChanged signal. "unknown" until a running daemon
     // asserts one; words this build does not recognise behave as "unknown"
@@ -106,6 +113,7 @@ PlasmoidItem {
     property int credentialGeneration: 0
     property int downloadGeneration: 0
     property int indexGeneration: 0
+    property int uploadGeneration: 0
 
     // The sync root. The daemon knows its mount but the D-Bus surface does
     // not expose it, so like the tray (which is told with --mount) the
@@ -311,6 +319,20 @@ PlasmoidItem {
         root.indexing = value === true;
     }
 
+    // The per-file upload list rides its own signal too, so it carries its own
+    // generation the same way — an ActiveUploadsChanged that lands while a cold
+    // GetAll is in flight must win over the older read. A D-Bus `as` (array of
+    // strings) decodes to a JS array of strings; against a service too old to
+    // expose the property it is undefined, which normalizes to an empty list.
+    function applyUploads(value) {
+        root.uploadGeneration += 1;
+        root.activeUploads = (value !== null && typeof value === "object" && "value" in value)
+            ? value.value
+            : value;
+        if (!Array.isArray(root.activeUploads))
+            root.activeUploads = [];
+    }
+
     // The one cold read. Each half is applied only if no signal of its kind
     // arrived while the read was in flight: a signal always carries newer
     // knowledge than a read issued before it, and the service emits each
@@ -321,6 +343,7 @@ PlasmoidItem {
         const credentialGeneration = root.credentialGeneration;
         const downloadGeneration = root.downloadGeneration;
         const indexGeneration = root.indexGeneration;
+        const uploadGeneration = root.uploadGeneration;
         DBus.SessionBus.asyncCall({
             service: root.busName,
             path: root.objectPath,
@@ -348,6 +371,11 @@ PlasmoidItem {
             // `=== true` makes that the right "not indexing".
             if (indexGeneration === root.indexGeneration) {
                 root.applyIndexing(properties.Indexing);
+            }
+            // Uploading may be undefined against a service too old to expose it;
+            // applyUploads normalizes that to an empty list.
+            if (uploadGeneration === root.uploadGeneration) {
+                root.applyUploads(properties.Uploading);
             }
         }, error => {
             // The service raced away between appearing and answering; the
@@ -460,6 +488,12 @@ PlasmoidItem {
         // reason: an older flyout has no dbusIndexingChanged and ignores it.
         function dbusIndexingChanged(indexing) {
             root.applyIndexing(indexing);
+        }
+
+        // The per-file upload list, on its own member for the same reason: an
+        // older flyout has no dbusActiveUploadsChanged and ignores it.
+        function dbusActiveUploadsChanged(paths) {
+            root.applyUploads(paths);
         }
     }
 
