@@ -614,6 +614,38 @@ fn retiring_a_tray_unit_that_was_never_installed_runs_no_command() {
 }
 
 #[test]
+fn next_steps_point_into_the_release_payload_and_warn_about_previews() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = payload_dir(tmp.path());
+    let f = facts("/home/u/OneDrive", &bin);
+    let planned = install(
+        &f,
+        &Templates::default(),
+        &good_observed(),
+        &opts(&tmp.path().join("p")),
+    );
+    let text = planned
+        .actions
+        .unwrap()
+        .iter()
+        .filter_map(|action| match action {
+            Action::Manual { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let assets = tmp.path().join("share/onedrive-hydration/packaging");
+    assert!(
+        text.contains(&assets.display().to_string()),
+        "next steps must be executable from an installed release: {text}"
+    );
+    assert!(text.contains("install-servicemenu.sh"));
+    assert!(text.contains("install-overlay.sh"));
+    assert!(text.contains("previews read and hydrate cloud-only files"));
+    assert!(text.contains("will not change a global desktop preference"));
+}
+
+#[test]
 fn asking_for_both_is_allowed_but_says_so_out_loud() {
     let tmp = tempfile::tempdir().unwrap();
     let prefix = tmp.path().join("p");

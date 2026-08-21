@@ -6,13 +6,17 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64.workspace = true
 blocking.workspace = true
 hydration-client.workspace = true
 hydration-graph.workspace = true
 keyring.workspace = true
+percent-encoding.workspace = true
+ring.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+ureq.workspace = true
 zbus.workspace = true
 
 [dev-dependencies]

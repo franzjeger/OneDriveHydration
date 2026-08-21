@@ -26,14 +26,18 @@ uses — see below.
 
 `io.github.franzjeger.OneDriveHydration` on the session bus — the surface
 `onedrive-hydration-dbus` serves. It subscribes to `StateChanged` and
-`CredentialStateChanged` and never polls; one cold `GetAll` when the service
+`CredentialStateChanged` and never polls daemon state; one cold `GetAll` when the service
 (re)appears is the documented complement to the signals, because a freshly
 started service does not signal a state it considers unchanged. Eviction —
 deliberately absent from the tray menu because it needs a file picker —
 lives here: "Free Up Space…" opens the native picker rooted at the sync
 folder and calls `Evict` with the path made relative to it. A daemon refusal
 comes back as the named `Error.Kept` and is shown with the daemon's reason
-verbatim.
+verbatim. When the daemon reports a rejected credential, an explicit **Sign in**
+button asks the owner-checked `BeginEnrollment` method for a browser/PKCE URL.
+Only that active, five-minute interaction polls `EnrollmentStatus`; normal sync
+state remains entirely signal-driven. The refresh token is stored directly in
+Linux Secret Service before the browser receives a success page.
 
 The wording of every state is copied from `tray.rs` verbatim, and
 `crates/onedrive-daemon/tests/plasmoid_package.rs` pins the two against each
@@ -107,17 +111,12 @@ Built deliberately against what exists rather than inventing data:
   through `--mount`.
 * Placeholder and unsent figures are file counts; there are no byte totals,
   so "how much disk would hydrating cost" cannot be shown.
-* No account identity, no quota, no per-file transfer progress, no recent
-  activity, no conflict list.
-* Credential health is now on the surface (`CredentialState`, with
-  `CredentialStateChanged`) and shown — "Sign-in required" names
-  `tools/pkce-enroll.py`, the enrollment that works on this deployment,
-  because Conditional Access blocks the daemon's device-code flow. What the
-  flyout still cannot do is *start* enrollment: an in-product sign-in flow
-  waits on the PKCE threat-model review (docs/ROADMAP.md M1), and the flyout
-  does not even know the daemon's client id. There is deliberately no
-  sign-in button — a button that cannot do the thing it names is worse than
-  a sentence that can be followed.
+* No account identity, quota, byte totals, recent activity, or conflict list.
+  Per-file upload names and whole-object download activity are available, but
+  the framework exposes no byte-level transfer progress.
+* Credential health and user-initiated browser re-enrollment are now on the
+  surface. The generated D-Bus unit carries the public client id; no credential
+  or authorization code crosses the D-Bus interface.
 
 Widening the surface is its own task with its own measurements; this flyout
 shows everything the surface can currently say and nothing it cannot.

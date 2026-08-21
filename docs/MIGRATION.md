@@ -9,7 +9,7 @@ OneDriveForLinux is a donor and behavioral reference, not a base branch.
 | Existing upload queue | Replace with HydrationAPI and GraphSink |
 | Existing token cache | Replace with hydration-graph TokenCache |
 | Device-code presentation | Port behind hydration-graph auth |
-| PKCE browser flow | Adapt after threat-model review |
+| PKCE browser flow | Rewritten in Rust after threat-model acceptance; retained loopback listener, S256/state validation, direct Secret Service write |
 | Automatic drive discovery | Port Graph behavior, rewrite transport integration |
 | QuickXorHash | Implemented in HydrationAPI from Microsoft's published algorithm; no donor code |
 | Resumable downloads | Port behavior after the fetch seam streams/ranges |

@@ -70,17 +70,17 @@ per network round trip, not per process.
   `Downloading` property, which is structurally 0/1 — the "N of T" batch
   state lives in the shell loop and is invisible to the tray.
 
-## Planned features (in rough order of cost)
+## Remaining ideas (in rough order of cost)
 
-1. **Retry on EIO in the wrappers** (cheap, shell-only): treat
-   `Input/output error` as "daemon busy, retry" with a short backoff, so
-   concurrent user actions do not surface as per-file failures.
+1. **Completed: bounded retry on measured busy EIO.** Keep on Device retries
+   only the exact `error: Input/output error (os error 5)` result five times with a
+   one-second backoff; other errors remain immediate.
 2. **Batch progress on the tray/flyout** (architectural): the wrapper would
    push `total/done/bytes` to the daemon over a new D-Bus method, and the
    plasmoid would render it — unifying the box and the tray. Blocked on a
    daemon-side method; the D-Bus surface today is
    `DaemonRunning`, `Unsent`, `Excluded`, `Exposures`, `CredentialState`,
-   `Downloading`, `Indexing` plus `Evict(s)`.
+   `Downloading`, `Indexing`, `Uploading`, enrollment, plus `Evict(s)`.
 3. **Quota / storage used in the flyout** (daemon change): not in the D-Bus
    surface; needs the daemon to expose it.
 4. **Pause/resume sync** (daemon change): not implemented anywhere.

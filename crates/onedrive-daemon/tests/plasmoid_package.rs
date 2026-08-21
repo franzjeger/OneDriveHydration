@@ -138,8 +138,11 @@ fn the_flyout_dials_the_surface_this_crate_serves() {
     // The documented complement to the signal: one cold read of all the
     // properties when the service (re)appears.
     assert!(qml.contains("\"GetAll\""));
-    // The one method the surface offers.
+    // The file action and user-initiated browser enrollment methods.
     assert!(qml.contains("\"Evict\""));
+    assert!(qml.contains("\"BeginEnrollment\""));
+    assert!(qml.contains("\"EnrollmentStatus\""));
+    assert!(read("contents/ui/FullRepresentation.qml").contains("Sign in"));
     // The named errors the flyout branches on.
     assert!(qml.contains(".Error.Kept"));
     for icon in [ICON_SYNCED, ICON_UNSENT, ICON_EXPOSED, ICON_STOPPED] {

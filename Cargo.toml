@@ -8,16 +8,20 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.85"
 
 [workspace.dependencies]
+base64 = "0.23"
 blocking = "1"
 libc = "0.2"
 hydration-client = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "010221741d000fd032734209cbcbd82a9e400972" }
 hydration-graph = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "010221741d000fd032734209cbcbd82a9e400972", features = ["http"] }
 keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
+percent-encoding = "2"
+ring = "0.17"
 # "event" is one zero-timeout poll: how the auth-state socket notices a
 # watcher hung up during a quiet stretch without reading from it.
 rustix = { version = "1", features = ["process", "event"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ureq = { version = "3.3", default-features = false, features = ["rustls", "gzip"] }
 # Newest zbus whose tree still builds on this workspace's rust-version;
 # 5.14.0 and later require Rust 1.87. Its zvariant/zbus_names/zvariant_utils
 # companions are held back in Cargo.lock for the same reason.

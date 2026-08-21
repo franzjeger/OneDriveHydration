@@ -806,14 +806,18 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 name = "onedrive-hydration-daemon"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "blocking",
  "hydration-client",
  "hydration-graph",
  "keyring",
+ "percent-encoding",
+ "ring",
  "rustix",
  "serde",
  "serde_json",
  "tempfile",
+ "ureq",
  "zbus 5.13.2",
 ]
 

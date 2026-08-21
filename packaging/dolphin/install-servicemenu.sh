@@ -3,10 +3,10 @@
 # on purpose, like the plasmoid: this needs no privileges, and a system package
 # would install the same two files under /usr/share instead.
 #
-# The action is data — a KIO servicemenu .desktop plus a small wrapper — so
+# The actions are data — KIO servicemenu .desktop files plus small wrappers — so
 # there is no toolkit and no new dependency, the same trade the tray and the
-# flyout made. The overlay emblems in the roadmap's other half cannot be done
-# this way; see docs/DOLPHIN-GROUNDWORK.md for why, and what it would cost.
+# flyout made. Overlay emblems cannot be data-only and ship separately as the
+# compiled KF6 plugin under overlay/.
 #
 # The icons are a prerequisite, not a bundled asset: the entry names the same
 # hicolor application icon the tray names, and ../icons/install-icons.sh
@@ -27,9 +27,8 @@ usage: install-servicemenu.sh [--mount <path>] [--bin-dir <dir>]
              because Dolphin runs the action with a minimal environment.
              default: /usr/local/bin
 
-Installs two files under \$XDG_DATA_HOME (default ~/.local/share):
-  kio/servicemenus/onedrive-hydration.desktop
-  onedrive-hydration/free-up-space.sh
+Installs two servicemenus and three wrappers under \$XDG_DATA_HOME
+(default ~/.local/share).
 EOF
     exit 2
 }

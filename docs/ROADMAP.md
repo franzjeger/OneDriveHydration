@@ -11,7 +11,9 @@
 ## M1: enroll and identify the account
 
 - [x] Device-code enrollment using the shared TokenCache
-- [ ] PKCE/browser enrollment threat-model review
+- [x] PKCE/browser enrollment threat-model review, with the accepted design
+      implemented as a retained IPv4 loopback listener, S256/state validation,
+      direct Secret Service storage and no plaintext handoff
 - [x] Resolve `/me/drive` instead of requiring `--drive-id`
 - [x] Store credentials through Secret Service/keyring
 - [ ] Live Graph smoke test using a dedicated non-production tenant
@@ -43,30 +45,27 @@
 
 ## M3: Linux product shell
 
-Feature work in this milestone is frozen until M2.5 is complete. Changes needed
-to expose an honest sync error or unsupported operation are still in scope.
+The product-shell scope is feature-complete. M2.5's external correctness gate
+still blocks declaring the release production-ready.
 
 - [x] Owner-only local status and eviction CLI
 - [x] D-Bus control surface
-- [x] Revision-matched Linux binary payload, including privileged helper
+- [x] Revision-matched, checksummed Linux release payload, including all product
+      binaries, the privileged helper, desktop assets, manifest and tagged publishing
 - [x] Validated systemd installer and units
 - [x] StatusNotifierItem tray icon and menu, signal-driven
 - [x] Flyout: system-tray plasmoid with eviction, signal-driven
 - [x] Credential state on the D-Bus surface (property + change signal), shown by
-      tray and flyout, with adopt-on-restart of a fresh `pkce-enroll.py` sign-in
-- [ ] In-product (re-)enrollment — blocked on M1's PKCE threat-model review; until
-      then the surfaces name `tools/pkce-enroll.py` and deliberately offer no
-      sign-in button
-- [x] Dolphin action: "Free Up Space" as a KIO servicemenu, shipped as data with
-      no new dependency; the entry's matching was measured with
+      tray and flyout, with owner-only restart notification after fresh enrollment
+- [x] In-product (re-)enrollment: explicit flyout Sign in, browser/PKCE by default
+      in the daemon CLI, retained device-code fallback, and terminal outcome reporting
+- [x] Dolphin actions: "Free Up Space" and "Keep on Device" for files and folders
+      as KIO servicemenus, shipped as data with no new dependency; entry matching was
+      measured with
       `probes/servicemenu-match.cpp` rather than taken from documentation
-- [ ] Dolphin status overlays — no data-only path exists: `KOverlayIconPlugin`
-      and `KVersionControlPlugin` are both compiled C++, so this is a dependency
-      decision (CMake, Qt6 and KF6 in a Cargo workspace, and a `.so` installed as
-      root) and not more of the same work. The per-file xattrs it would read are
-      already on disk; `docs/DOLPHIN-GROUNDWORK.md` has the measurements, the
-      `st_blocks` trap it must avoid, and the stale donor plugin it would collide
-      with
+- [x] Dolphin status overlays: compiled KF6 `KOverlayIconPlugin`, xattr-only reads,
+      targeted refresh after residency changes, configured-root scoping and removal
+      of the stale donor overlay collision
 
 ### The neighbour-reader hydration hazard (measured live, 2026-08-15)
 
@@ -94,8 +93,7 @@ already in its `exclude folders`.
       a content thumbnail. Per-folder `.directory` is **not** recursive and would
       write into the sync root (and upload) unless `.directory` is added to
       `.hydration-ignore`, so it is the weaker option.
-- [ ] **Open question for the installer:** whether the product should apply the
-      previews-off setting itself (intrusive — it changes the user's Dolphin
-      globally), offer it, or only document it. Other content readers (backup
-      agents, antivirus, `updatedb`, a second indexer) remain out of the product's
-      reach and belong in user-facing docs as the same class of hazard.
+- [x] **Installer policy:** document and print the previews-off recommendation;
+      never silently mutate Dolphin's global preference. Other content readers
+      (backup agents, antivirus, `updatedb`, a second indexer) remain out of the
+      product's reach and belong in user-facing docs as the same class of hazard.

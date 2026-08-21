@@ -44,9 +44,9 @@ four states:
   `onedrive-hydration.svg`.
 - The donor's other three SVGs (`onedrive-cloud`, `onedrive-partial`,
   `onedrive-upload`) are 16 px file-manager overlay *emblems* — per-file
-  state, not application state. They belong to the roadmap's "Dolphin
-  actions and status overlays" milestone and are deliberately not shipped
-  here until that work names them; they remain in the donor repository.
+  state, not application state. The completed Dolphin plugin uses the desktop
+  theme's `cloud-download` and `emblem-success` icons instead, so those donor
+  assets remain unnecessary and are not shipped.
 
 The donor repository declares no license of its own. Both repositories have
 the same author, and these ported and derived files are distributed under

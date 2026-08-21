@@ -96,6 +96,16 @@ PlasmoidItem {
     // re-enroll instruction over a locked keyring is the exact wrong
     // message. Mirrors tray.rs's present().
     property string credentialState: "unknown"
+    property bool enrollmentBusy: false
+    property string enrollmentResult: ""
+    property bool enrollmentFailed: false
+
+    Timer {
+        interval: 1000
+        repeat: true
+        running: root.enrollmentBusy
+        onTriggered: root.readEnrollmentStatus()
+    }
 
     // False until the first read or signal after the service (re)appears.
     // Reads are asynchronous here (unlike the tray's blocking cold read), so
@@ -187,10 +197,9 @@ PlasmoidItem {
     // now, while a dead sign-in stops sync loudly), unsent work, synced.
     // Wording rule for the stopped states: the files are *unreachable*, not
     // lost, and the text says so explicitly — and the signed-out state
-    // follows the same rule, naming the enrollment tool that actually works
-    // on this deployment. Deliberately no sign-in button: the flyout cannot
-    // run a browser flow and does not even know the daemon's client id, so
-    // the honest ceiling is a sentence a person can follow in a terminal.
+    // follows the same rule, naming both enrollment routes that work on this
+    // deployment. The explicit flyout button starts the browser flow through
+    // the owner-checked D-Bus method; it is never triggered automatically.
     readonly property var presentation: {
         if (!serviceWatcher.registered) {
             return {
@@ -239,7 +248,7 @@ PlasmoidItem {
             };
         }
         if (root.credentialState === "rejected") {
-            let detail = "OneDrive no longer accepts this machine's saved sign-in — it was revoked, expired, or invalidated by a password change or policy. Nothing is lost: every synced file is still in OneDrive, but nothing syncs and cloud-only files cannot be opened until you sign in again. Sign in from a terminal with tools/pkce-enroll.py (Conditional Access blocks the built-in device-code sign-in here); the daemon adopts it and restarts by itself.";
+            let detail = "OneDrive no longer accepts this machine's saved sign-in — it was revoked, expired, or invalidated by a password change or policy. Nothing is lost: every synced file is still in OneDrive, but nothing syncs and cloud-only files cannot be opened until you sign in again. Use the flyout's Sign in button, or run onedrive-hydration-daemon reauth from a terminal; browser PKCE works when Conditional Access blocks device code, and the daemon restarts onto the new sign-in.";
             if (root.unsent > 0) {
                 detail += " " + root.count(root.unsent, "change is", "changes are") + " still waiting to upload.";
             }
@@ -301,6 +310,11 @@ PlasmoidItem {
     function applyCredential(value) {
         root.credentialGeneration += 1;
         root.credentialState = root.credentialWord(value);
+        if (root.credentialState === "healthy") {
+            root.enrollmentBusy = false;
+            root.enrollmentFailed = false;
+            root.enrollmentResult = "Sign-in completed.";
+        }
     }
 
     // The download count travels on its own signal, so it carries its own
@@ -386,6 +400,54 @@ PlasmoidItem {
 
     function openMount() {
         Qt.openUrlExternally(root.mountUrl);
+    }
+
+    function beginEnrollment() {
+        root.enrollmentBusy = true;
+        root.enrollmentFailed = false;
+        root.enrollmentResult = "Preparing secure browser sign-in…";
+        DBus.SessionBus.asyncCall({
+            service: root.busName,
+            path: root.objectPath,
+            iface: root.busName,
+            member: "BeginEnrollment",
+            arguments: []
+        }, reply => {
+            root.enrollmentResult = "Finish signing in in your browser.";
+            if (!Qt.openUrlExternally(reply.value)) {
+                root.enrollmentFailed = true;
+                root.enrollmentResult = "The browser could not be opened. Open this URL manually: " + reply.value;
+            }
+        }, reply => {
+            root.enrollmentBusy = false;
+            root.enrollmentFailed = true;
+            root.enrollmentResult = reply.error.message;
+        });
+    }
+
+    function readEnrollmentStatus() {
+        DBus.SessionBus.asyncCall({
+            service: root.busName,
+            path: root.objectPath,
+            iface: root.busName,
+            member: "EnrollmentStatus",
+            arguments: []
+        }, reply => {
+            const status = reply.value;
+            if (status === "complete") {
+                root.enrollmentBusy = false;
+                root.enrollmentFailed = false;
+                root.enrollmentResult = "Sign-in completed.";
+            } else if (typeof status === "string" && status.startsWith("error:")) {
+                root.enrollmentBusy = false;
+                root.enrollmentFailed = true;
+                root.enrollmentResult = status.slice("error:".length);
+            }
+        }, reply => {
+            root.enrollmentBusy = false;
+            root.enrollmentFailed = true;
+            root.enrollmentResult = reply.error.message;
+        });
     }
 
     // Return a hydrated file to a placeholder over the surface's Evict

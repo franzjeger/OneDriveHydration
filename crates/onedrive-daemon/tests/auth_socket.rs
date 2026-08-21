@@ -148,7 +148,7 @@ fn read_line(reader: &mut BufReader<UnixStream>) -> String {
 }
 
 fn write_enrollment(path: &Path, content: &str) {
-    // 0600 by construction, the way tools/pkce-enroll.py writes it.
+    // 0600 by construction, matching the legacy migration file contract.
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -207,12 +207,31 @@ fn status_answers_in_prose_on_the_same_connection_repeatedly() {
     stream.write_all(b"status\n").unwrap();
     let answer = read_line(&mut reader);
     assert!(answer.contains("sign-in: REQUIRED"), "{answer}");
-    assert!(answer.contains("tools/pkce-enroll.py"), "{answer}");
+    assert!(
+        answer.contains("onedrive-hydration-daemon reauth"),
+        "{answer}"
+    );
 
     // Unknown verbs answer, not hang — same discipline as the control
     // socket.
     stream.write_all(b"evict x\n").unwrap();
     assert_eq!(read_line(&mut reader), "unknown command: evict x");
+}
+
+#[test]
+fn a_direct_secret_service_enrollment_requests_one_restart() {
+    let publisher = Publisher::start(healthy(), None);
+    let main_socket = publisher.socket.with_extension("sock");
+
+    auth_state::notify_enrollment(&main_socket).unwrap();
+    publisher
+        .adoptions
+        .recv_timeout(READ_DEADLINE)
+        .expect("the daemon did not restart for the direct enrollment");
+    assert!(
+        publisher.adoptions.try_recv().is_err(),
+        "one notification must request one restart"
+    );
 }
 
 #[test]

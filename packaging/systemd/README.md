@@ -48,9 +48,10 @@ and a destructive operation); it does not touch `/etc/fstab` without
 `--consent-fstab`, and there is no code path that composes an entry without
 `noauto`; it does not enroll credentials or invent a client id — `--client-id`
 is required, and it is public configuration, never a secret; and it does not
-install or remove the Plasma applet or the Dolphin action, which are per-user
-operations on the user's own session data — `packaging/plasmoid/install-plasmoid.sh`
-and `packaging/dolphin/install-servicemenu.sh` are printed instead, and
+install or remove the Plasma applet or Dolphin integration, which are per-user
+operations on the user's own session data — the release payload's plasmoid,
+servicemenu and overlay installer paths are printed instead. It also prints the
+previews-off recommendation but never changes Dolphin's global preference.
 `uninstall` names the `kpackagetool6 --remove` line rather than running it.
 
 `--prefix <dir>` rehearses an install or uninstall against a scratch root:

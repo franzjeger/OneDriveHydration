@@ -1,5 +1,6 @@
 pub mod auth_state;
 pub mod dbus;
+pub mod pkce;
 pub mod tray;
 
 use hydration_graph::auth::{AuthConfig, CredentialStore, RefreshToken, TokenCache};
@@ -313,15 +314,22 @@ pub fn token_cache(config: AuthConfig, state_dir: &Path) -> io::Result<SharedTok
     )))
 }
 
+/// Store a newly enrolled refresh token directly in Linux Secret Service.
+///
+/// Browser enrollment uses this instead of the legacy state-directory handoff,
+/// so the credential is never written to a plaintext filesystem path. The
+/// account key is exactly the one [`token_cache`] uses on the next start.
+pub fn store_enrolled_credential(config: &AuthConfig, refresh: &RefreshToken) -> io::Result<()> {
+    let user = format!("refresh-token:{}", config.client_id());
+    SecretServiceCredentialStore(KeyringBackend::new(&user)?).save(refresh)
+}
+
 /// Adopt a credential file left in the state directory, then remove it.
 ///
-/// Two writers produce that file and both mean the same thing: the
-/// file-backed alpha (once, on upgrade), and enrollment tooling —
-/// `tools/pkce-enroll.py` — every time someone signs in from a browser
-/// because Conditional Access blocks the daemon's device-code flow. The
-/// daemon consumes the file on every start, so its presence means an
-/// enrollment happened *after* the last start, and the file is therefore
-/// newer than anything in the secure store by construction.
+/// Old builds produced that file through the file-backed alpha or the legacy
+/// external browser helper. Current browser enrollment writes Secret Service
+/// directly. The daemon still consumes a leftover file on every start, so an
+/// upgrade cannot strand the credential that made the old deployment work.
 ///
 /// The file wins over a stored credential on purpose, and this reverses an
 /// earlier rule ("the secure credential wins over a stale legacy file").
@@ -652,8 +660,8 @@ mod tests {
     #[test]
     fn a_fresh_enrollment_replaces_the_stored_credential() {
         // The situation this models is the only one that produces both at
-        // once: the service rejected the stored credential, the user signed
-        // in again with tools/pkce-enroll.py, and the daemon restarted. The
+        // once on an old build: the service rejected the stored credential,
+        // the user ran the legacy browser helper, and the daemon restarted. The
         // file is the enrollment; deleting it and keeping the rejected
         // credential — the previous rule — made the product's own
         // re-authentication instructions a trap.

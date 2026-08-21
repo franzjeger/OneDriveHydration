@@ -66,6 +66,24 @@ ColumnLayout {
         Layout.fillWidth: true
     }
 
+    PlasmaComponents3.Button {
+        visible: full.host.daemonRunning && full.host.credentialState === "rejected"
+        enabled: !full.host.enrollmentBusy
+        text: full.host.enrollmentBusy ? "Waiting for browser…" : "Sign in"
+        icon.name: "system-log-in"
+        onClicked: full.host.beginEnrollment()
+    }
+
+    PlasmaComponents3.Label {
+        visible: full.host.enrollmentResult !== ""
+        text: full.host.enrollmentResult
+        color: full.host.enrollmentFailed
+            ? Kirigami.Theme.negativeTextColor
+            : Kirigami.Theme.textColor
+        wrapMode: Text.Wrap
+        Layout.fillWidth: true
+    }
+
     Kirigami.Separator {
         Layout.fillWidth: true
         visible: counters.visible

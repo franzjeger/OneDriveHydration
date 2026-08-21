@@ -210,6 +210,20 @@ fn the_keep_on_device_wrapper_parses_pin_and_hydrate_replies() {
 }
 
 #[test]
+fn keep_on_device_retries_only_the_measured_single_flight_eio() {
+    let wrapper = read("keep-on-device.sh.in");
+    assert!(wrapper.contains("hydrate_with_busy_retry"));
+    assert!(wrapper.contains("\"error: Input/output error (os error 5)\")"));
+    assert!(wrapper.contains("HYDRATE_BUSY_RETRIES=5"));
+    assert!(wrapper.contains("reply=$(hydrate_with_busy_retry \"$MOUNT/$childrel\")"));
+    assert!(wrapper.contains("reply=$(hydrate_with_busy_retry \"$abs\")"));
+    assert!(
+        !wrapper.contains("*\"error:\"*)"),
+        "generic errors must not be retried"
+    );
+}
+
+#[test]
 fn the_keep_on_device_wrapper_never_opens_the_file() {
     // The read that hydrates the file is inside onedrive-hydrationctl, invoked
     // as a command — never a read in this shell. Same rule as Free Up Space,
