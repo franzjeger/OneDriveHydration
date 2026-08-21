@@ -35,16 +35,17 @@
 //! not running", which is the honest ceiling; guessing further here is how
 //! a UI ends up telling someone to re-enroll over a locked keyring.
 //!
-//! While `rejected`, the publisher also watches for a fresh enrollment —
-//! `tools/pkce-enroll.py` leaves `refresh-token` in the state directory —
-//! and restarts the daemon to adopt it (by exiting nonzero; the unit's
-//! `Restart=on-failure` does the rest). The startup path is the only code
-//! that reads credential bytes; this module looks at metadata alone.
+//! Current enrollment writes Secret Service directly and sends the owner-only
+//! `enrollment-complete` command here; the publisher restarts so startup can
+//! rediscover the account. While `rejected`, it also retains the alpha migration
+//! path: a settled legacy `refresh-token` file triggers the same restart. This
+//! module never reads credential bytes.
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -135,6 +136,21 @@ pub fn auth_socket(main_socket: &Path) -> PathBuf {
     main_socket.with_extension("auth")
 }
 
+/// Tell a running daemon that a new credential was stored directly in Secret
+/// Service. The daemon exits nonzero so its `Restart=on-failure` unit reloads
+/// the credential and rediscovers the account before syncing another byte.
+pub fn notify_enrollment(main_socket: &Path) -> io::Result<()> {
+    let reply = crate::control_request(&auth_socket(main_socket), "enrollment-complete")?;
+    if reply == "restarting to adopt the new sign-in" {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the daemon returned an unexpected enrollment reply",
+        ))
+    }
+}
+
 /// More live watchers than this and new ones are refused by closing them
 /// without a line — the same refusal shape as the control socket, and
 /// handled by the same reconnect-with-backoff on the other side. The
@@ -190,8 +206,8 @@ fn status_line(health: CredentialHealth) -> String {
             health.store_error.unwrap_or(io::ErrorKind::Other)
         ),
         CredentialState::Rejected => "sign-in: REQUIRED — OneDrive no longer accepts this \
-             machine's saved sign-in. Sign in again from a terminal with tools/pkce-enroll.py; \
-             the daemon adopts the new sign-in and restarts itself."
+             machine's saved sign-in. Use the flyout's Sign in button or run \
+             onedrive-hydration-daemon reauth; the daemon restarts onto the new sign-in."
             .to_owned(),
     }
 }
@@ -237,10 +253,15 @@ pub fn serve(
     let mut health = sample();
     let current = Arc::new(Mutex::new(health));
     let watchers: Arc<Mutex<Vec<UnixStream>>> = Arc::new(Mutex::new(Vec::new()));
+    let restart_requested = Arc::new(AtomicBool::new(false));
 
     {
-        let (current, watchers) = (Arc::clone(&current), Arc::clone(&watchers));
-        std::thread::spawn(move || accept_loop(listener, &current, &watchers));
+        let (current, watchers, restart_requested) = (
+            Arc::clone(&current),
+            Arc::clone(&watchers),
+            Arc::clone(&restart_requested),
+        );
+        std::thread::spawn(move || accept_loop(listener, &current, &watchers, &restart_requested));
     }
 
     // The enrollment file must hold still for one whole interval before it
@@ -278,6 +299,17 @@ pub fn serve(
             }
         }
         cull(&watchers);
+
+        // Browser enrollment writes directly to Secret Service. Restart even
+        // when the old credential is still healthy: the new sign-in may name a
+        // different account, and drive discovery must run before it is used.
+        if restart_requested.swap(false, Ordering::SeqCst) {
+            eprintln!(
+                "onedrive-hydration-daemon: a new sign-in was stored in Secret Service; \
+                 restarting to reload it and rediscover the account"
+            );
+            adopt();
+        }
 
         if let Some(path) = options.enrollment.as_deref() {
             let snapshot = crate::enrollment_snapshot(path);
@@ -336,6 +368,7 @@ fn accept_loop(
     listener: UnixListener,
     current: &Mutex<CredentialHealth>,
     watchers: &Mutex<Vec<UnixStream>>,
+    restart_requested: &AtomicBool,
 ) {
     for conn in listener.incoming().flatten() {
         let _ = conn.set_read_timeout(Some(Duration::from_secs(10)));
@@ -363,6 +396,10 @@ fn accept_loop(
                         }
                     }
                     break;
+                }
+                "enrollment-complete" => {
+                    restart_requested.store(true, Ordering::SeqCst);
+                    "restarting to adopt the new sign-in".to_owned()
                 }
                 "" => continue,
                 other => format!("unknown command: {other}"),
@@ -473,7 +510,10 @@ mod tests {
             signed_in: false,
             store_error: None,
         });
-        assert!(rejected.contains("tools/pkce-enroll.py"), "{rejected}");
-        assert!(rejected.contains("restarts itself"), "{rejected}");
+        assert!(
+            rejected.contains("onedrive-hydration-daemon reauth"),
+            "{rejected}"
+        );
+        assert!(rejected.contains("restarts onto"), "{rejected}");
     }
 }

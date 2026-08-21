@@ -12,16 +12,21 @@ use std::io;
 use std::path::PathBuf;
 
 fn usage() -> ! {
-    eprintln!("usage:\n  onedrive-hydration-dbus [--socket <path>]");
+    eprintln!(
+        "usage:\n  onedrive-hydration-dbus [--socket <path>] [--client-id <public-client-id>]"
+    );
     std::process::exit(2)
 }
 
 fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
     let mut socket = None;
+    let mut client_id = None;
     while let Some(arg) = args.next() {
         if arg == "--socket" {
             socket = Some(PathBuf::from(args.next().unwrap_or_else(|| usage())));
+        } else if arg == "--client-id" {
+            client_id = Some(args.next().unwrap_or_else(|| usage()));
         } else {
             usage();
         }
@@ -33,7 +38,10 @@ fn main() -> io::Result<()> {
     // The gate `Evict` holds callers to: the same uid that owns the control
     // socket, which is the uid this service runs as.
     let owner = rustix::process::geteuid().as_raw();
-    let surface = ControlSurface::new(socket.clone(), Some(owner));
+    let mut surface = ControlSurface::new(socket.clone(), Some(owner));
+    if let Some(client_id) = client_id {
+        surface = surface.with_enrollment(client_id);
+    }
     let connection = zbus::blocking::connection::Builder::session()
         .and_then(|b| b.serve_at(OBJECT_PATH, surface))
         .and_then(|b| b.build())

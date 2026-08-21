@@ -9,6 +9,7 @@ set -u
 MOUNT='@MOUNT@'
 CTL='@CTL@'
 TITLE='OneDrive Hydration'
+HYDRATE_BUSY_RETRIES=5
 
 # Dolphin spawns this with a minimal environment. kdialog and notify-send
 # need the session bus and runtime dir to work, so restore them.
@@ -79,6 +80,30 @@ refresh_overlay() {
     dbus-send --session --type=signal /org/kde/KDirNotify \
         org.kde.KDirNotify.FilesChanged "array:string:file://$(urlencode "$1")" \
         >/dev/null 2>&1 || true
+}
+
+# HydrationAPI is deliberately single-flight today. A second user action can
+# therefore receive EIO while another file owns the fetch channel; the same
+# file succeeds as soon as that request finishes. Retry only that measured
+# transient, with a small bounded wait. Every other reply is returned verbatim
+# immediately, so a real path, auth, or integrity failure is never hidden.
+hydrate_with_busy_retry() {
+    _target=$1
+    _attempt=0
+    while :; do
+        _reply=$("$CTL" hydrate "$_target" 2>&1) || true
+        case "$_reply" in
+            "error: Input/output error (os error 5)")
+                if [ "$_attempt" -lt "$HYDRATE_BUSY_RETRIES" ]; then
+                    _attempt=$((_attempt + 1))
+                    sleep 1
+                    continue
+                fi
+                ;;
+        esac
+        printf '%s' "$_reply"
+        return 0
+    done
 }
 
 # A progress dialog for a folder pull — which can be hundreds of files and take a
@@ -254,7 +279,7 @@ for f in "$@"; do
         fi
         while IFS= read -r childrel; do
             [ -n "$childrel" ] || continue
-            reply=$("$CTL" hydrate "$MOUNT/$childrel" 2>&1) || true
+            reply=$(hydrate_with_busy_retry "$MOUNT/$childrel")
             case "$reply" in
                 "hydrated "*" bytes")
                     n=${reply#hydrated }
@@ -307,7 +332,7 @@ EOF
 
     # A file: hydrate it directly, by absolute path, so the ctl binary opens
     # exactly the file named.
-    reply=$("$CTL" hydrate "$abs" 2>&1) || true
+    reply=$(hydrate_with_busy_retry "$abs")
     case "$reply" in
         "hydrated "*" bytes")
             n=${reply#hydrated }

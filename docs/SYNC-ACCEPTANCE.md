@@ -91,10 +91,22 @@ settle, restart both daemon halves, and verify the result again.
      Verify that the folder identity follows the rename, that the empty folder
      appears on the other side, and that deleting a non-empty folder on one
      side retains the local (and cloud) content rather than erasing it.
+11. Enroll through browser/PKCE with a native browser and with a sandboxed
+    Flatpak or Snap browser. Verify the literal `127.0.0.1` callback, account
+    picker, direct Secret Service write, automatic daemon restart, and the
+    bounded diagnostic when sandbox policy blocks host loopback. Repeat once
+    with `--device-code` on a tenant where that flow is permitted.
+
+Store the evidence outside the sync root and record the product commit, exact
+HydrationAPI revision (`tools/hydration-api-rev.sh`), tenant/test-folder name,
+two client host identifiers, timestamps, result for every numbered row, and
+paths to redacted logs. Never commit access tokens, refresh tokens,
+authorization codes, user principal names, or tenant secrets.
 
 ## Release rule
 
-The client remains **not ready for user data** until every blocking namespace
-row has an explicit contract, adversarial automated coverage and a passing live
-result. Product-shell work stays frozen except where needed to expose an honest
-sync error or unsupported operation.
+The client remains a **release candidate, not ready for the only copy of user
+data**, until every blocking namespace row has an explicit contract,
+adversarial automated coverage and a passing live result. A release verdict
+must cite its redacted evidence bundle; the existence of a tag or green CI is
+not a substitute.

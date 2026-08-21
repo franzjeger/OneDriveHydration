@@ -42,10 +42,12 @@
 //! connect, and handled the same way: the bounded retry, not an error.
 
 use crate::auth_state::{self, CredentialState};
-use crate::control_request;
+use crate::{auth_config, control_request, store_enrolled_credential};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use zbus::message::Header;
 use zbus::names::BusName;
@@ -395,6 +397,10 @@ pub enum Error {
     InvalidPath(String),
     /// The caller's identity could not be established or is not the owner.
     Denied(String),
+    /// The service lacks the public client configuration enrollment needs.
+    EnrollmentUnavailable(String),
+    /// A loopback listener is already waiting for this user's browser.
+    EnrollmentBusy(String),
 }
 
 /// The object served at [`OBJECT_PATH`].
@@ -416,6 +422,9 @@ pub struct ControlSurface {
     /// test harness only, where there is no bus driver to ask and the
     /// transport is a socketpair nothing else can reach.
     require_uid: Option<u32>,
+    enrollment_client_id: Option<String>,
+    enrollment_busy: Arc<AtomicBool>,
+    enrollment_status: Arc<Mutex<String>>,
 }
 
 impl ControlSurface {
@@ -425,7 +434,17 @@ impl ControlSurface {
             state: DaemonState::default(),
             credential: CredentialState::Unknown,
             require_uid,
+            enrollment_client_id: None,
+            enrollment_busy: Arc::new(AtomicBool::new(false)),
+            enrollment_status: Arc::new(Mutex::new("idle".to_owned())),
         }
+    }
+
+    /// Enable user-initiated browser enrollment. The caller, not this service,
+    /// opens the returned URL in the desktop session.
+    pub fn with_enrollment(mut self, client_id: String) -> Self {
+        self.enrollment_client_id = Some(client_id);
+        self
     }
 
     /// The eviction gate. The session bus already refuses other users at
@@ -575,6 +594,89 @@ impl ControlSurface {
             }
             Err(e) => Err(Error::Failed(format!("control request failed: {e}"))),
         }
+    }
+
+    /// Prepare a browser/PKCE sign-in and return the URL the caller should open.
+    /// The D-Bus service never launches the browser itself.
+    async fn begin_enrollment(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> Result<String, Error> {
+        self.caller_permitted(&header, connection).await?;
+        let client_id = self.enrollment_client_id.clone().ok_or_else(|| {
+            Error::EnrollmentUnavailable(
+                "the state service has no client id; reinstall the generated user units".to_owned(),
+            )
+        })?;
+        if self
+            .enrollment_busy
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(Error::EnrollmentBusy(
+                "a browser sign-in is already waiting for its redirect".to_owned(),
+            ));
+        }
+        let enrollment = match crate::pkce::BrowserEnrollment::begin(&client_id) {
+            Ok(enrollment) => enrollment,
+            Err(error) => {
+                self.enrollment_busy.store(false, Ordering::SeqCst);
+                return Err(Error::Failed(format!(
+                    "browser enrollment could not start: {error}"
+                )));
+            }
+        };
+        if let Ok(mut status) = self.enrollment_status.lock() {
+            *status = "waiting".to_owned();
+        }
+        let url = enrollment.authorize_url().to_owned();
+        let busy = Arc::clone(&self.enrollment_busy);
+        let status = Arc::clone(&self.enrollment_status);
+        let socket = self.socket.clone();
+        std::thread::spawn(move || {
+            let config = auth_config(client_id);
+            let outcome = enrollment
+                .complete(|refresh| store_enrolled_credential(&config, refresh))
+                .map(|_| match auth_state::notify_enrollment(&socket) {
+                    Ok(()) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                        ) => {}
+                    Err(error) => eprintln!(
+                        "onedrive-hydration-dbus: sign-in was stored but the daemon could not \
+                         be notified: {error}"
+                    ),
+                });
+            if let Err(error) = outcome {
+                eprintln!("onedrive-hydration-dbus: browser enrollment failed: {error}");
+                if let Ok(mut status) = status.lock() {
+                    *status = format!("error:{error}");
+                }
+            } else if let Ok(mut status) = status.lock() {
+                *status = "complete".to_owned();
+            }
+            busy.store(false, Ordering::SeqCst);
+        });
+        Ok(url)
+    }
+
+    /// Return progress for the user-initiated enrollment. The flyout polls
+    /// this only while a browser flow is active; daemon state itself remains
+    /// signal-driven. Values are `idle`, `waiting`, `complete`, or
+    /// `error:<safe diagnostic>`.
+    async fn enrollment_status(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> Result<String, Error> {
+        self.caller_permitted(&header, connection).await?;
+        self.enrollment_status
+            .lock()
+            .map(|status| status.clone())
+            .map_err(|_| Error::Failed("the enrollment status lock was poisoned".to_owned()))
     }
 
     /// Fired once per distinct state, carrying the same values as the

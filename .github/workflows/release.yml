@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -38,14 +38,24 @@ jobs:
         run: cargo build --release --locked -p hydrationd --bin hydrationd
       - name: Assemble one auditable product payload
         run: |
-          install -d payload/bin payload/libexec payload/share/doc/onedrive-hydration
-          install -m 0755 product/target/release/onedrive-hydration-daemon payload/bin/
-          install -m 0755 product/target/release/onedrive-hydrationctl payload/bin/
-          install -m 0755 hydration-api/target/release/hydrationd payload/libexec/
-          install -m 0644 product/README.md product/LICENSE-APACHE product/LICENSE-MIT payload/share/doc/onedrive-hydration/
-          test "$(stat -c '%a' payload/libexec/hydrationd)" = 755
-          tar --owner=0 --group=0 --numeric-owner -czf onedrive-hydration-linux-x86_64.tar.gz -C payload .
-          sha256sum onedrive-hydration-linux-x86_64.tar.gz > onedrive-hydration-linux-x86_64.tar.gz.sha256
+          epoch=$(git -C product show -s --format=%ct HEAD)
+          SOURCE_DATE_EPOCH=$epoch product/tools/assemble-release.sh \
+            product hydration-api onedrive-hydration-linux-x86_64.tar.gz
+          for path in \
+            ./bin/hydrationd \
+            ./bin/onedrive-hydration-daemon \
+            ./bin/onedrive-hydrationctl \
+            ./bin/onedrive-hydration-dbus \
+            ./bin/onedrive-hydration-tray \
+            ./bin/onedrive-hydration-install \
+            ./share/onedrive-hydration/packaging/icons/install-icons.sh \
+            ./share/onedrive-hydration/packaging/plasmoid/install-plasmoid.sh \
+            ./share/onedrive-hydration/packaging/dolphin/install-servicemenu.sh \
+            ./share/onedrive-hydration/packaging/dolphin/overlay/install-overlay.sh \
+            ./share/doc/onedrive-hydration/MANIFEST.sha256
+          do
+            tar -tzf onedrive-hydration-linux-x86_64.tar.gz | grep -Fx "$path"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: onedrive-hydration-linux-x86_64
@@ -53,3 +63,13 @@ jobs:
             onedrive-hydration-linux-x86_64.tar.gz
             onedrive-hydration-linux-x86_64.tar.gz.sha256
           if-no-files-found: error
+      - name: Publish the tagged release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --generate-notes \
+            onedrive-hydration-linux-x86_64.tar.gz \
+            onedrive-hydration-linux-x86_64.tar.gz.sha256

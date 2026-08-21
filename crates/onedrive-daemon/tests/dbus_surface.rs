@@ -68,6 +68,26 @@ fn method_error(result: zbus::Result<u64>) -> (String, String) {
 }
 
 #[test]
+fn browser_enrollment_is_an_explicit_configured_surface() {
+    let (_server, client) = served_pair(ControlSurface::new(PathBuf::from("/nonexistent"), None));
+    let proxy = tray_proxy(&client);
+    assert_eq!(
+        proxy.call::<_, _, String>("EnrollmentStatus", &()).unwrap(),
+        "idle"
+    );
+    let error = proxy
+        .call::<_, _, String>("BeginEnrollment", &())
+        .unwrap_err();
+    match error {
+        zbus::Error::MethodError(name, detail, _) => {
+            assert!(name.as_str().ends_with(".Error.EnrollmentUnavailable"));
+            assert!(detail.unwrap_or_default().contains("no client id"));
+        }
+        other => panic!("expected a configured-enrollment error, got {other:?}"),
+    }
+}
+
+#[test]
 fn properties_update_and_state_changed_fires_once_per_publish() {
     let (server, client) = served_pair(ControlSurface::new(PathBuf::from("/nonexistent"), None));
     let proxy = tray_proxy(&client);

@@ -802,19 +802,26 @@ pub fn install(
     // can do in general: the whole point of --tray is that the choice stops
     // being silent, and next-steps that named a unit this run did not install
     // would put it straight back.
+    let desktop_assets = facts
+        .bin_dir
+        .parent()
+        .unwrap_or(Path::new("/usr/local"))
+        .join("share/onedrive-hydration/packaging");
     let tray_next = match tray {
         Tray::Sni => format!(
             "the tray starts with the next graphical session, or now with: systemctl \
-             --user start {unit} (icons: run packaging/icons/install-icons.sh once \
+             --user start {unit} (icons: run {assets}/icons/install-icons.sh once \
              per user)",
-            unit = units::TRAY_UNIT
+            unit = units::TRAY_UNIT,
+            assets = desktop_assets.display()
         ),
         Tray::Plasmoid => format!(
             "the tray is the Plasma applet, which this tool did not install and will \
-             not — as {u}, and in this order: packaging/icons/install-icons.sh, then \
-             packaging/plasmoid/install-plasmoid.sh; a running plasmashell picks up a \
+             not — as {u}, and in this order: {assets}/icons/install-icons.sh, then \
+             {assets}/plasmoid/install-plasmoid.sh; a running plasmashell picks up a \
              first install by itself",
-            u = facts.user
+            u = facts.user,
+            assets = desktop_assets.display()
         ),
         Tray::None => "no tray was installed (--tray none); onedrive-hydrationctl \
                        status is the surface, and the only place the exposure warning \
@@ -833,14 +840,18 @@ pub fn install(
              flyout); a session bus that predates this install may need one \
              log-out/log-in to notice the new activation file\n\
              {tray_next}\n\
-             for Dolphin's \"Free Up Space\" action, as {u}: \
-             packaging/dolphin/install-servicemenu.sh --mount {m} (data only, no \
-             overlays — see docs/DOLPHIN-GROUNDWORK.md)\n\
+             for Dolphin's \"Free Up Space\" and \"Keep on Device\" actions, as {u}: \
+             {assets}/dolphin/install-servicemenu.sh --mount {m}\n\
+             for cloud/on-device badges (compiled KF6 plugin): \
+             {assets}/dolphin/overlay/install-overlay.sh --mount {m}\n\
+             keep Dolphin previews off for this sync tree: previews read and hydrate \
+             cloud-only files; this installer will not change a global desktop preference\n\
              not enrolled yet? as {u}: onedrive-hydration-daemon auth --state-dir \
              ~/.local/state/onedrive-hydration --client-id <the id you passed>\n\
              this tool did NOT create the subvolume, did NOT edit fstab beyond what \
-             was shown, did NOT install the Plasma applet or the Dolphin action, \
+             was shown, did NOT install the Plasma applet or Dolphin integration, \
              and did NOT touch credentials — those stay yours",
+            assets = desktop_assets.display(),
             m = facts.mount.display(),
             u = facts.user
         ),

@@ -2,15 +2,22 @@ use hydration_client::daemon_loop::{self, Config};
 use hydration_graph::{DriveScope, GraphAccess, GraphHttp, TagSource};
 use onedrive_hydration_daemon::auth_state::{self, CredentialHealth, PublisherOptions};
 use onedrive_hydration_daemon::{
-    auth_config, discover_drive, runtime_socket, token_cache, wait_for_secret_service,
-    SECRET_SERVICE_WAIT,
+    auth_config, discover_drive, runtime_socket, store_enrolled_credential, token_cache,
+    wait_for_secret_service, SECRET_SERVICE_WAIT,
 };
+use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[derive(Clone, Copy)]
+enum AuthFlow {
+    Browser,
+    DeviceCode,
+}
+
 enum Command {
-    Auth,
+    Auth { force: bool, flow: AuthFlow },
     Run { mount: PathBuf },
 }
 
@@ -45,7 +52,8 @@ fn required(name: &str) -> String {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  onedrive-hydration-daemon auth --state-dir <path> --client-id <uuid>\n  \
+        "usage:\n  onedrive-hydration-daemon auth|reauth --state-dir <path> --client-id <uuid> \
+         [--browser|--device-code] [--no-browser] [--socket <path>]\n  \
          onedrive-hydration-daemon run --mount <path> --state-dir <path> --client-id <uuid> \
          [--socket <path>] [--autoevict]"
     );
@@ -53,8 +61,22 @@ fn usage() -> ! {
 }
 
 fn parse() -> Args {
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    if let Err(error) = validate_cli(&raw) {
+        eprintln!("onedrive-hydration-daemon: {error}");
+        usage();
+    }
+    let flow = match (flag("--browser"), flag("--device-code")) {
+        (false, false) | (true, false) => AuthFlow::Browser,
+        (false, true) => AuthFlow::DeviceCode,
+        (true, true) => {
+            eprintln!("onedrive-hydration-daemon: choose only one enrollment flow");
+            usage();
+        }
+    };
     let command = match std::env::args().nth(1).as_deref() {
-        Some("auth") => Command::Auth,
+        Some("auth") => Command::Auth { force: false, flow },
+        Some("reauth") => Command::Auth { force: true, flow },
         Some("run") => Command::Run {
             mount: PathBuf::from(required("--mount")),
         },
@@ -77,6 +99,46 @@ fn parse() -> Args {
     }
 }
 
+fn validate_cli(args: &[String]) -> Result<(), String> {
+    let command = args.first().map(String::as_str).ok_or("missing command")?;
+    let (values, switches): (&[&str], &[&str]) = match command {
+        "auth" | "reauth" => (
+            &["--state-dir", "--client-id", "--socket"],
+            &["--browser", "--device-code", "--no-browser"],
+        ),
+        "run" => (
+            &["--mount", "--state-dir", "--client-id", "--socket"],
+            &["--autoevict"],
+        ),
+        other => return Err(format!("unknown command: {other}")),
+    };
+    let mut seen = HashSet::new();
+    let mut index = 1;
+    while index < args.len() {
+        let argument = args[index].as_str();
+        if !seen.insert(argument) {
+            return Err(format!("duplicate argument: {argument}"));
+        }
+        if values.contains(&argument) {
+            if index + 1 >= args.len() || args[index + 1].starts_with("--") {
+                return Err(format!("missing value for {argument}"));
+            }
+            index += 2;
+        } else if switches.contains(&argument) {
+            index += 1;
+        } else {
+            return Err(format!("argument {argument} is not valid for {command}"));
+        }
+    }
+    if command != "run"
+        && args.iter().any(|arg| arg == "--device-code")
+        && args.iter().any(|arg| arg == "--no-browser")
+    {
+        return Err("--no-browser applies only to browser enrollment".to_owned());
+    }
+    Ok(())
+}
+
 fn auth_error(action: &'static str) -> impl FnOnce(hydration_graph::auth::AuthError) -> io::Error {
     move |_| io::Error::new(io::ErrorKind::PermissionDenied, action)
 }
@@ -93,22 +155,63 @@ fn main() -> io::Result<()> {
         // prompt is better served by the error than by a silent minute.
         wait_for_secret_service(SECRET_SERVICE_WAIT)?;
     }
-    let cache = token_cache(auth_config(args.client_id), &args.state_dir)?;
+    let config = auth_config(args.client_id);
+    let cache = token_cache(config.clone(), &args.state_dir)?;
     match args.command {
-        Command::Auth => {
-            if cache.resume()? {
+        Command::Auth { force, flow } => {
+            if !force && cache.resume()? {
                 println!("Already signed in.");
                 return Ok(());
             }
-            let code = cache
-                .begin_device_code()
-                .map_err(auth_error("device-code enrollment could not be started"))?;
-            println!("Open {}", code.verification_uri());
-            println!("Enter code: {}", code.user_code());
-            cache
-                .complete_device_code(&code)
-                .map_err(auth_error("device-code enrollment did not complete"))?;
-            println!("Sign-in completed and the rotated credential was stored.");
+            match flow {
+                AuthFlow::Browser => {
+                    let enrollment = onedrive_hydration_daemon::pkce::BrowserEnrollment::begin(
+                        config.client_id(),
+                    )?;
+                    println!(
+                        "Redirect URI (register this public-client URI once): {}",
+                        enrollment.redirect_uri()
+                    );
+                    println!("Open this URL to sign in:\n{}", enrollment.authorize_url());
+                    if !flag("--no-browser") {
+                        if let Err(e) = onedrive_hydration_daemon::pkce::open_browser(
+                            enrollment.authorize_url(),
+                        ) {
+                            eprintln!("onedrive-hydration-daemon: {e}");
+                        }
+                    }
+                    println!("Waiting for the browser redirect…");
+                    let scope = enrollment
+                        .complete(|refresh| store_enrolled_credential(&config, refresh))?;
+                    println!("Sign-in completed and was stored in Linux Secret Service.");
+                    if let Some(scope) = scope {
+                        println!("Granted scopes: {scope}");
+                    }
+                }
+                AuthFlow::DeviceCode => {
+                    let code = cache
+                        .begin_device_code()
+                        .map_err(auth_error("device-code enrollment could not be started"))?;
+                    println!("Open {}", code.verification_uri());
+                    println!("Enter code: {}", code.user_code());
+                    cache
+                        .complete_device_code(&code)
+                        .map_err(auth_error("device-code enrollment did not complete"))?;
+                    println!("Sign-in completed and the rotated credential was stored.");
+                }
+            }
+            match auth_state::notify_enrollment(&args.socket) {
+                Ok(()) => println!("The running daemon is restarting onto the new sign-in."),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                    ) => {}
+                Err(e) => eprintln!(
+                    "onedrive-hydration-daemon: the sign-in was stored, but the running daemon \
+                     could not be notified ({e}); restart it before syncing"
+                ),
+            }
             Ok(())
         }
         Command::Run { mount } => {
@@ -222,5 +325,37 @@ fn main() -> io::Result<()> {
                 access,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::validate_cli;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn enrollment_flags_are_scoped_and_unambiguous() {
+        assert!(validate_cli(&args(&[
+            "reauth",
+            "--state-dir",
+            "/state",
+            "--client-id",
+            "id",
+            "--no-browser",
+        ]))
+        .is_ok());
+        assert!(validate_cli(&args(&["run", "--browser"])).is_err());
+        assert!(validate_cli(&args(&["auth", "--autoevict"])).is_err());
+        assert!(validate_cli(&args(&["auth", "--device-code", "--no-browser"])).is_err());
+    }
+
+    #[test]
+    fn unknown_duplicate_and_valueless_arguments_are_refused() {
+        assert!(validate_cli(&args(&["auth", "--mystery"])).is_err());
+        assert!(validate_cli(&args(&["run", "--mount", "/one", "--mount", "/two"])).is_err());
+        assert!(validate_cli(&args(&["auth", "--client-id"])).is_err());
     }
 }

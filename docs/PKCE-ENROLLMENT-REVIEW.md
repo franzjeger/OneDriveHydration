@@ -1,16 +1,17 @@
 # Browser (authorization-code + PKCE) enrollment: threat-model review
 
-> **STATUS: DRAFT for the repository owner to accept or reject.**
-> This is the review that `docs/ROADMAP.md` M1 lists as unchecked
-> ("PKCE/browser enrollment threat-model review"). It is a security decision
-> about whether authorization-code/PKCE enrollment belongs *in the product*.
-> It is not an agent's to ratify: nothing here has been merged, no `Grant`
-> variant has been added, and the roadmap box is left unticked on purpose. The
-> recommendation at the end is a proposal, not a resolution.
+> **STATUS: ACCEPTED AND IMPLEMENTED, 2026-08-21.**
+> The implementation follows the recommendation's security properties with two
+> recorded architecture amendments: browser orchestration lives in the product
+> layer rather than adding a UI-shaped `Grant` to HydrationAPI, and the
+> owner-checked D-Bus service may hold the one-shot listener and write Secret
+> Service while the QML caller—not the service—launches the browser. The
+> dedicated-tenant and sandboxed-browser runs remain part of the external live
+> release gate.
 
 ## Why this is on the critical path, and why now
 
-The shipped daemon knows exactly one way to sign in: the OAuth 2.0 device code
+At the time of this review the daemon knew exactly one way to sign in: the OAuth 2.0 device code
 flow (RFC 8628). `hydration-graph`'s `Grant` enum has three variants —
 `DeviceCode`, `DeviceToken`, `Refresh` — and no fourth
 (`crates/.../hydration-graph/src/auth.rs`). That was a deliberate scope line: a
@@ -32,8 +33,8 @@ turned the flow's own shape — read a code from one channel, type it into a log
 page reached by another — into a credential-harvesting technique at scale. A
 tenant that blocks device code is doing the thing Microsoft told it to do.
 
-So for this deployment the device code flow is not a fallback that is merely
-slower or uglier. It is unusable. Enrollment happens today through
+So for this deployment the device code flow was not a fallback that was merely
+slower or uglier. It was unusable. Enrollment then happened through
 `tools/pkce-enroll.py` — a standalone, stdlib-only script that performs the
 browser half (authorization code with PKCE against a loopback redirect) and
 leaves a refresh token where the daemon's migration already looks for it. That
@@ -41,7 +42,7 @@ script is prior art for this review, not a product component, and it says so in
 its own docstring: it "deliberately lives outside `hydration-graph`" and is "not
 a down payment on that review." This document is that review.
 
-Two roadmap items wait behind it. M3's "Re-authentication UX" needs *some*
+Two roadmap items waited behind it. M3's "Re-authentication UX" needed *some*
 in-product way to re-enroll when a credential dies. An installer that can enroll
 needs the same. And anyone else adopting this product on a device-code-blocking
 tenant hits the wall we hit. The question this review has to answer is narrow and
@@ -244,12 +245,12 @@ OneDrive account. That is a larger blast radius than any operation currently
 guarded in this codebase, and the guard reasoning should exceed, not merely
 match, what already exists.
 
-Today enrollment is a same-uid, same-session act: either `onedrive-hydration-daemon
-auth` (interactive, in the user's own process) or `pkce-enroll.py` run by the
-user. The gate is Unix: you must be the user, able to write the state directory
-and unlock the user's Secret Service collection. There is **no** IPC enrollment
-surface. That is a fine posture and the review does not propose widening it
-speculatively.
+Enrollment remains a same-uid, same-session act. The CLI performs it in the
+user's own process. The Plasma route is an explicit button calling an
+owner-checked session-bus method: the service retains the one-shot listener and
+stores the credential, while QML opens the returned URL in the user's browser.
+There is no token or authorization code on D-Bus, no automatic trigger, and no
+cross-user surface.
 
 The relevant precedent is the D-Bus `Evict` method, which re-checks the caller's
 uid against the daemon's own euid through `GetConnectionCredentials` and fails
@@ -270,14 +271,12 @@ enrollment with more force, not less:
   re-check, and the review's position is that it should carry more: the request
   should be an owner-initiated interactive action, never a silent headless call,
   because a silent enrollment trigger is an account-swap primitive.
-- There is also a practical reason enrollment resists being a daemon method:
+- There is also a practical reason enrollment resists being a sync-daemon method:
   the browser flow must *launch a browser as the user in the user's session*.
   A daemon method invoked over the bus is the wrong place to be spawning
-  `xdg-open`. This is an argument for keeping enrollment in a user-session-scoped,
-  user-initiated tool (a CLI subcommand, or a small helper the tray launches in
-  the session) rather than a `ControlSurface` method — the re-auth UX can *prompt*
-  via D-Bus state (credential health, once M3 adds it) while the act of enrolling
-  stays a user-launched, session-scoped process.
+  `xdg-open`. The implemented split preserves that boundary: the session-scoped
+  `ControlSurface` prepares the URL, but the user-facing QML launches it only in
+  response to the button. The sync daemon never launches a browser.
 
 ---
 
@@ -380,27 +379,28 @@ document:
 
 ---
 
-## 7. Recommendation (DRAFT — owner decides)
+## 7. Accepted recommendation and implementation outcome
 
-**Build it in the product, under the conditions below — do not bless the external
-script as the permanent answer, and do not remove device code.**
+**Decision: build it in the product under the conditions below; do not bless the
+external script as the permanent answer, and do not remove device code.**
 
 The credential and privilege boundary is unchanged by a browser flow (§2); the
 loopback + PKCE public-client pattern is legitimate under Microsoft's documented
 rules (§1); and the one place the *script* is weaker than in-product device code —
 a plaintext token file — is an artifact of being external and disappears when the
-flow installs straight into the shared `TokenCache` (§2). Meanwhile device code
-is measured-unusable on this tenant, and both the M3 re-auth UX and an enrolling
-installer are blocked waiting on this decision.
+flow installs straight into the shared credential store (§2). Meanwhile device
+code was measured unusable on this tenant, and both the M3 re-auth UX and a
+complete installer had been blocked waiting on this decision.
 
-Conditions on building it:
+Conditions and their implementation:
 
-1. **Add an authorization-code + PKCE `Grant` alongside device code in
-   `hydration-graph`, not replacing it.** Keep device code for headless hosts and
-   for tenants that permit it (§5).
-2. **Install directly into the shared `TokenCache` and Secret Service; no
-   plaintext file.** Eliminate the `<state-dir>/refresh-token` handoff that only
-   exists because the current tool is external (§2).
+1. **Keep browser/PKCE alongside device code, not replacing it.** Implemented in
+   the product layer because listener/browser orchestration is a product concern;
+   HydrationAPI remains the owner of refresh and access-token behavior. Device
+   code remains available for headless hosts and tenants that permit it (§5).
+2. **Install directly into the shared credential store and Secret Service; no
+   plaintext file.** Implemented. The `<state-dir>/refresh-token` reader remains
+   solely as a one-way migration path for alpha installations (§2).
 3. **Bind and register `127.0.0.1` literally, in both the `redirect_uri` and the
    listener** — never `localhost` (§1a). Register one path-less
    `http://127.0.0.1` redirect via the app-registration manifest
@@ -410,17 +410,17 @@ Conditions on building it:
    yields challenge `E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM`, matching the
    RFC's own vector), `state` validated before the code is spent,
    `prompt=select_account` to prevent silently enrolling a live SSO session's
-   account, the `0600`-by-construction file mode (until the file is removed
-   entirely per condition 2), the silenced HTTP access log, and the printed-URL
-   `--no-browser` fallback.
+   account, the silenced HTTP access log, and the printed-URL `--no-browser`
+   fallback. No new enrollment file exists to assign a mode to.
 5. **Close the `free_port()` TOCTOU** by handing the already-bound listening
    socket to the server rather than closing and re-binding (§1c).
-6. **Keep enrollment a user-initiated, session-scoped act.** If re-auth is
-   surfaced on D-Bus, it must carry at least the `Evict` uid re-check, treat the
-   trigger as a prompt rather than a silent action, and launch the browser in the
-   user's session — not from a bus method (§3).
+6. **Keep enrollment a user-initiated, session-scoped act.** Implemented by the
+   CLI and by an explicit flyout button. `BeginEnrollment` carries the same uid
+   re-check as `Evict`, returns only the public authorize URL, and never launches
+   a browser; QML performs that user-session action (§3).
 7. **Before shipping, test against a sandboxed (Flatpak/Snap) default browser**
-   and make the loopback-timeout path diagnosable (§6.2).
+   and make the loopback-timeout path diagnosable (§6.2). The bounded diagnostic
+   is implemented; the live sandbox run remains in the external release gate.
 
 Rejected alternatives, recorded:
 
@@ -432,15 +432,16 @@ Rejected alternatives, recorded:
 - **Replace device code with PKCE.** Rejected: device code is the only flow that
   works headlessly, and blocking it is the tenant's choice, not a property of the
   flow (§5).
-- **Expose enrollment as a D-Bus method for the tray.** Rejected as the *act* of
-  enrolling (§3); the tray may prompt, but the browser launch and credential write
-  belong in a session-scoped, user-launched process.
+- **Let a D-Bus call silently launch the browser or swap an account.** Rejected
+  (§3). The accepted surface only responds to an explicit flyout action, repeats
+  the caller-uid check, and leaves browser launch to QML. The session-scoped
+  service owns the listener and Secret Service write so no credential crosses IPC.
 
 ---
 
-*Do not tick `docs/ROADMAP.md` M1's "PKCE/browser enrollment threat-model
-review" on the basis of this draft. The box is the owner's to tick once this
-decision is accepted or amended.*
+The roadmap review item is complete. The live sandboxed-browser and dedicated
+tenant exercises are evidence gates in `SYNC-ACCEPTANCE.md`, not reasons to
+reopen the architecture decision.
 
 <!-- References (Microsoft Learn, retrieved 2026-08-12):
 [reply-url]: https://learn.microsoft.com/en-us/entra/identity-platform/reply-url

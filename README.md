@@ -11,24 +11,19 @@ security boundary.
 
 ## Status
 
-Early integration work. The daemon has device-code enrollment backed by Linux Secret Service,
-automatic primary-drive discovery, reviewed GraphAccess wiring, constant-memory streamed
-downloads and fail-closed QuickXorHash verification, a D-Bus state service and tray, a
-validated systemd installer that refuses deployments which would fail open
-(see [packaging/systemd](packaging/systemd/README.md)), and a Plasma flyout plasmoid with
-eviction. The daemon now says whether it is signed in — a credential state on its own
-socket and on the D-Bus surface, shown by the tray and flyout with the enrollment
-instruction that works here — but in-product (re-)enrollment still waits on the PKCE
-threat-model review. Dolphin has the action half of its integration ("Free Up Space",
-shipped as data); the status overlays are not built, because they are the one surface
-with no data-only path. It is not ready for user data.
+Feature-complete release candidate. The product includes browser/PKCE and device-code
+enrollment backed directly by Linux Secret Service, automatic primary-drive discovery,
+streamed and resumable downloads, the fail-closed HydrationAPI sync engine, a validated
+systemd installer, a signal-driven D-Bus service and tray, an in-product Plasma flyout with
+sign-in and eviction, and Dolphin actions plus live file-status overlays. Tagged builds
+publish a revision-matched, checksummed payload containing every runtime binary and desktop
+asset.
 
-Namespace correctness, not desktop polish, is the release blocker. The pinned HydrationAPI
-revision gives same-folder file rename, atomic-save identity and conditional deletion an
-explicit contract. Cross-folder local moves and local folder operations now also have
-fail-closed implementations and adversarial tests, but they still need the live validation
-required by the [sync correctness gate](docs/SYNC-ACCEPTANCE.md). Product-shell feature work
-is frozen until those blocking rows pass against a dedicated test tenant.
+The remaining release gate is external validation, not an unimplemented product feature:
+the complete two-device/process-restart matrix in the
+[sync correctness gate](docs/SYNC-ACCEPTANCE.md) must pass against a dedicated,
+non-production Microsoft 365 tenant. Until that evidence exists, treat this as a release
+candidate rather than entrusting it with the only copy of user data.
 
 ## Design rules
 
@@ -53,21 +48,21 @@ Enroll once; the refresh token is stored in the desktop's Linux Secret Service c
 The command fails closed when no Secret Service provider is available or the collection cannot
 be unlocked; it never falls back to a plaintext token file.
 
-At every start, a `refresh-token` file in the state directory — the file-backed alpha's, or
-one freshly written by `tools/pkce-enroll.py` — is adopted: written into Secret Service,
-*replacing* any stored credential, and removed only after the secure write succeeds. The file
-wins on purpose: the daemon consumes it on every start, so its presence means an enrollment
-happened since the last start, and the one situation that produces both at once is a stored
-credential the service has rejected plus the fresh sign-in that fixes it. A migration error
-stops startup. While running signed-out (the service refused the stored credential), the
-daemon watches for that file and, once it has settled, exits so its systemd unit restarts it
-onto the new sign-in — enrollment while the daemon runs therefore needs no manual restart.
+At every start, a legacy `refresh-token` file in the state directory is migrated into Secret
+Service and removed only after the secure write succeeds. This compatibility path exists for
+file-backed alpha installations; current enrollment never writes plaintext credentials.
+Browser enrollment stores the refresh token directly, then sends an owner-only restart
+notification so a running daemon adopts the new account without a manual restart.
 
 ```text
 cargo run -p onedrive-hydration-daemon -- auth \
   --state-dir "$HOME/.local/state/onedrive-hydration" \
   --client-id <azure-client-id>
 ```
+
+Browser/PKCE is the default. Use `reauth` to replace an existing credential,
+`--no-browser` to print the URL without launching it, or `--device-code` for a
+headless machine whose tenant permits device-code sign-in.
 
 Then start the daemon. The signed-in user's primary drive ID is resolved automatically.
 At startup `run` waits, bounded (60s), for `org.freedesktop.secrets` to be owned or
@@ -100,12 +95,14 @@ For desktop integration there is a session D-Bus service that mirrors the contro
 tray can subscribe instead of polling and never needs to know the socket exists:
 
 ```text
-cargo run -p onedrive-hydration-daemon --bin onedrive-hydration-dbus
+cargo run -p onedrive-hydration-daemon --bin onedrive-hydration-dbus -- \
+  --client-id <azure-client-id>
 ```
 
 It owns `io.github.franzjeger.OneDriveHydration` and serves, at the object path of the same
-name, `DaemonRunning`, `Unsent`, `Excluded` and `Exposures` properties, an `Evict(path)`
-method with named errors, and a `StateChanged` signal that fires once per distinct state.
+name, `DaemonRunning`, `Unsent`, `Excluded`, `Exposures`, `Downloading`, `Indexing`, and
+`Uploading` properties; owner-checked `Evict(path)`, `BeginEnrollment`, and
+`EnrollmentStatus` methods; and signals that fire once per distinct daemon state.
 It also serves `CredentialState` — `healthy`, `unsaved` (syncing works but the rotated
 sign-in cannot be written to Secret Service), `rejected` (the service has conclusively
 refused the stored sign-in), or `unknown` when no running daemon has asserted one — with a
@@ -136,9 +133,8 @@ the panel draws everything. Five states are shown, in order of precedence: daemo
 service) not running, another mount exposing the sync files (`Exposures > 0`, rendered as
 `NeedsAttention` because reads through such a mount bypass hydration), sign-in required
 (`CredentialState` `rejected`, also `NeedsAttention`: nothing is lost, and the tooltip
-names `tools/pkce-enroll.py` because Conditional Access blocks the daemon's device-code
-flow on this deployment — deliberately a sentence and not a button, since the tray cannot
-run a browser flow), changes waiting to upload, and up to date. An `unsaved` credential is
+points to `onedrive-hydration-daemon reauth`; the toolkit-free tray cannot launch a browser),
+changes waiting to upload, and up to date. An `unsaved` credential is
 a warning sentence appended to whichever of the running states is shown, not a state of
 its own: syncing still works, and the sentence says what breaks (the next restart) and
 what to do (unlock the keyring). Icons resolve by name from the hicolor theme; run
@@ -152,27 +148,45 @@ On Plasma 6 the flyout exists, and it made the opposite trade the same way: a pl
 QML loaded by plasmashell's system tray, shipped as data with zero new Rust dependencies —
 instead of a toolkit. Install it per user with `packaging/plasmoid/install-plasmoid.sh`
 (icons first, as above); the running shell adopts it into the system tray by itself. It
-subscribes to the same `StateChanged` signal, shows the same states with the same wording —
-a test pins the two surfaces together — and adds the two actions the tray could not draw:
-opening the sync folder, and "Free Up Space…", which picks a file under the mount and calls
-`Evict`, quoting the daemon's refusal reason verbatim when it declines. On Plasma the
+subscribes to the same state signals, shows the same states with the same wording — a test
+pins the two surfaces together — and adds actions the tray could not draw: secure browser
+sign-in, opening the sync folder, and "Free Up Space…", which picks a file under the mount
+and calls `Evict`, quoting the daemon's refusal reason verbatim when it declines. On Plasma the
 plasmoid *is* the tray presence; running the SNI binary alongside it shows a second icon,
 so keep that one for desktops without plasmashell. Which of the two a deployment installs
 is told to the installer — `--tray sni|plasmoid|none` — and never detected: the applet
 draws only under plasmashell, the binary wherever there is a `StatusNotifierWatcher`, and
 which desktop the user logs into is not a fact at install time. Say nothing and it defaults
 to the binary, unless the applet is already installed for that user, which is refused until
-one of the three is named. What the flyout does not show is what
-the D-Bus surface cannot yet say — account, quota, per-file transfers, byte totals,
-credential health — and `packaging/plasmoid/README.md` keeps that list honestly.
+one of the three is named. What the flyout does not show is what the D-Bus surface cannot
+yet say — account identity, quota, byte totals, and recent activity — and
+`packaging/plasmoid/README.md` keeps that list honestly.
 
-Dolphin gets the same trade a third time: "Free Up Space" on a selected file is a KIO
-servicemenu — a `.desktop` file and a shell wrapper, no toolkit — installed per user with
-`packaging/dolphin/install-servicemenu.sh`. That KIO cannot filter a menu entry by path
+Dolphin gets the same trade a third time: "Free Up Space" and "Keep on Device" are KIO
+servicemenus — `.desktop` files and shell wrappers, no toolkit — installed per user with
+`packaging/dolphin/install-servicemenu.sh`. Both work for files; folder actions walk the
+daemon's pending list without opening placeholder content. KIO cannot filter a menu entry by path
 was measured, not assumed, so the entry exists on every file and the wrapper refuses,
 naming the sync root, for anything outside it; and because `onedrive-hydrationctl` exits
 zero when the daemon *declines* an eviction, the wrapper reads the reply rather than the
-exit status, with a test deriving those reply prefixes from the Rust parser. The status
-overlays are the exception to the whole pattern: `KOverlayIconPlugin` is compiled C++ with
-no data-only equivalent, so it is a dependency decision rather than more of the same, and
-`docs/DOLPHIN-GROUNDWORK.md` sets out what it would cost and what it must not get wrong.
+exit status, with a test deriving those reply prefixes from the Rust parser. Per-file
+cloud-only/on-device emblems are supplied by the compiled KF6 `KOverlayIconPlugin` under
+`packaging/dolphin/overlay`; it reads xattr metadata only and pushes targeted refreshes after
+either action.
+
+## Release payload
+
+Tagged builds publish `onedrive-hydration-linux-x86_64.tar.gz` and its SHA-256 file. The
+archive has a `/usr/local`-shaped `bin/` and `share/` tree, a per-file manifest, the exact
+HydrationAPI revision, all six runtime binaries, documentation, and desktop integration.
+After verifying the archive checksum, copy its contents into `/usr/local`, then run:
+
+```text
+sudo /usr/local/bin/onedrive-hydration-install install \
+  --user "$USER" --mount "$HOME/OneDrive" --client-id <azure-client-id> \
+  --tray plasmoid
+```
+
+The installer performs the kernel, filesystem, mount-namespace, exposure, fstab, Secret
+Service, and payload checks before writing units. See
+[packaging/systemd](packaging/systemd/README.md) for storage preparation and refusal details.

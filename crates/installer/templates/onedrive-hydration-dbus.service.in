@@ -13,7 +13,7 @@ Documentation=https://github.com/franzjeger/OneDriveHydration
 # that name.
 Type=dbus
 BusName=io.github.franzjeger.OneDriveHydration
-ExecStart=@BIN@/onedrive-hydration-dbus
+ExecStart=@BIN@/onedrive-hydration-dbus --client-id @CLIENT_ID@
 # While the sync daemon is down this service keeps running and reports
 # DaemonRunning=false, reconnecting on its own with bounded backoff — daemon
 # absence is a reported state, not a failure. Restart= therefore only covers
@@ -30,7 +30,7 @@ LockPersonality=yes
 # companion file the installer writes to ~/.local/share/dbus-1/services/
 # names this unit in its SystemdService= line, so the bus asks the user
 # manager to start it the first time anything talks to the name — the tray's
-# initial cold property read, a busctl introspect, the future flyout. A
+# initial cold property read, a busctl introspect, or the flyout. A
 # session with no subscriber runs no state service at all, which is the
 # point: an eagerly started copy would spend the whole session serving state
 # to nobody, and the bus queues the activating call until the name appears,
