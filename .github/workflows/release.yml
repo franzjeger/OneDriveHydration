@@ -27,7 +27,7 @@ jobs:
           repository: franzjeger/HydrationAPI
           ref: ${{ steps.hydration_api.outputs.rev }}
           path: hydration-api
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.100
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev pkg-config
       - name: Build unprivileged product binaries

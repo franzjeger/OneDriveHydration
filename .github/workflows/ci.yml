@@ -26,7 +26,7 @@ jobs:
           repository: franzjeger/HydrationAPI
           ref: ${{ steps.hydration_api.outputs.rev }}
           path: .upstream/hydration-api
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.100
       - name: Install Secret Service build dependency
         run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev pkg-config
       - name: Build product binaries
@@ -62,7 +62,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.100
       - name: Build the installer
         run: cargo build --locked -p onedrive-hydration-install
       - name: A plain directory is refused, with the dirmark reason
@@ -121,7 +121,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.100
       - name: Install Secret Service build dependency
         run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev pkg-config
       - run: cargo check --workspace --all-targets --locked
