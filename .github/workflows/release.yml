@@ -10,7 +10,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  HYDRATION_API_REV: b97fceb927bd614529e10245444a419151dfd5af
 
 jobs:
   linux-tarball:
@@ -19,10 +18,14 @@ jobs:
       - uses: actions/checkout@v5
         with:
           path: product
+      - name: Resolve the HydrationAPI revision locked by the product
+        id: hydration_api
+        working-directory: product
+        run: echo "rev=$(tools/hydration-api-rev.sh)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v5
         with:
           repository: franzjeger/HydrationAPI
-          ref: ${{ env.HYDRATION_API_REV }}
+          ref: ${{ steps.hydration_api.outputs.rev }}
           path: hydration-api
       - uses: dtolnay/rust-toolchain@1.85
       - name: Install build dependencies
