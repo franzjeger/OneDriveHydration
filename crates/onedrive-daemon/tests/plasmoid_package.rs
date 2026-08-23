@@ -138,6 +138,10 @@ fn the_flyout_dials_the_surface_this_crate_serves() {
     // The documented complement to the signal: one cold read of all the
     // properties when the service (re)appears.
     assert!(qml.contains("\"GetAll\""));
+    assert!(
+        qml.contains("Component.onCompleted: root.readAll()"),
+        "the applet's first read must be unconditional so it activates a cold D-Bus service"
+    );
     // The file action and user-initiated browser enrollment methods.
     assert!(qml.contains("\"Evict\""));
     assert!(qml.contains("\"BeginEnrollment\""));

@@ -11,9 +11,10 @@
 // The daemon's control socket stays the single authority and the state
 // service its only translator; this file holds nothing but the last state it
 // was told. It subscribes to `StateChanged` and never polls: one cold
-// property read when the service (re)appears on the bus — the documented
-// complement to the signal, because a freshly started service does not
-// signal a state it considers unchanged — and signals from then on. This
+// property read when the applet loads (which also activates the D-Bus service)
+// and when the service later reappears on the bus — the documented complement
+// to the signal, because a freshly started service does not signal a state it
+// considers unchanged — and signals from then on. This
 // mirrors crates/onedrive-daemon/src/tray.rs, and the user-facing wording
 // here is copied from tray.rs verbatim; tests/plasmoid_package.rs pins the
 // two against each other so they cannot drift apart silently.
@@ -392,9 +393,9 @@ PlasmoidItem {
                 root.applyUploads(properties.Uploading);
             }
         }, error => {
-            // The service raced away between appearing and answering; the
-            // service watcher flips `registered` off on its own, and the
-            // presentation already says the state is unknown. Nothing to do.
+            // Activation failed or the service raced away before answering.
+            // The service watcher keeps `registered` false (or flips it off),
+            // and the presentation already says the state is unknown.
         });
     }
 
@@ -576,9 +577,9 @@ PlasmoidItem {
 
     Plasmoid.contextualActions: [openFolderAction]
 
-    Component.onCompleted: {
-        if (serviceWatcher.registered) {
-            readAll();
-        }
-    }
+    // Do not wait for DBusServiceWatcher.registered here. After login the bus
+    // name is normally activatable but has no owner yet; this first method call
+    // is what asks D-Bus/systemd to start onedrive-hydration-dbus. Waiting for
+    // an owner before making it creates a cold-start deadlock.
+    Component.onCompleted: root.readAll()
 }
