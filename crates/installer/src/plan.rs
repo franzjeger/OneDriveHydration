@@ -844,6 +844,8 @@ pub fn install(
              {assets}/dolphin/install-servicemenu.sh --mount {m}\n\
              for cloud/on-device badges (compiled KF6 plugin): \
              {assets}/dolphin/overlay/install-overlay.sh --mount {m}\n\
+             the same actions for GNOME Files, as {u}: \
+             {assets}/nautilus/install-nautilus-scripts.sh --mount {m}\n\
              keep Dolphin previews off for this sync tree: previews read and hydrate \
              cloud-only files; this installer will not change a global desktop preference\n\
              not enrolled yet? as {u}: onedrive-hydration-daemon auth --state-dir \
