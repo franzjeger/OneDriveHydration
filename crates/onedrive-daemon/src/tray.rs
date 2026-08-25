@@ -33,7 +33,22 @@
 //! Eviction is deliberately absent from the menu. `Evict` needs a path, a
 //! path needs a file picker, and a file picker needs a GUI toolkit this
 //! binary intentionally does not link. It belongs to the flyout, which owns
-//! that decision.
+//! that decision — and on a desktop without the flyout, to the file
+//! manager's context-menu actions (`packaging/dolphin`, `packaging/nautilus`),
+//! which have the selection in hand and need no picker at all.
+//!
+//! What the menu *does* carry, beyond the status line, are the flyout's
+//! informational rows — downloading, indexing, the uploads in flight — and a
+//! sign-in action. They exist because on the desktops this binary serves the
+//! menu is often the whole surface: GNOME's StatusNotifier extension renders
+//! no tooltip (measured on GNOME Shell 50), so detail that lives only in
+//! `ToolTip` is detail nobody sees. The rows are statements — disabled
+//! items, hidden through the dbusmenu `visible` property while they have
+//! nothing to say, so the layout keeps its fixed shape. The sign-in entry
+//! calls the state service's `BeginEnrollment`: the service prepares the
+//! browser flow and hands back a URL, and opening a URL is `xdg-open`, not a
+//! toolkit. It appears only while the *running* daemon reports the stored
+//! credential rejected, the same rule the headline follows.
 
 use crate::auth_state::CredentialState;
 use crate::dbus::{DaemonState, BUS_NAME, INTERFACE, OBJECT_PATH};
@@ -83,6 +98,25 @@ pub struct Presentation {
     pub headline: String,
     /// A sentence or two of tooltip body.
     pub detail: String,
+    /// The menu's "Cloud-only placeholders: …" row — the flyout's counter of
+    /// the same name, shown (count and all, zero included) whenever the
+    /// daemon runs. The one row that is not activity: it is what the mount
+    /// *is*, so an idle menu still says something true instead of nothing.
+    pub placeholders_row: Option<String>,
+    /// The menu's "Downloading …" row, only while the daemon runs and a
+    /// fetch is in flight. `None` hides the row (the dbusmenu `visible`
+    /// property), so the layout keeps its fixed shape.
+    pub downloading_row: Option<String>,
+    /// Whether the menu shows its fixed "Indexing…" row — the delta pass,
+    /// the flyout's row of the same name.
+    pub indexing_row: bool,
+    /// The menu's "Uploading …" row: what is going up right now, by name
+    /// when it is one file and by count when it is several.
+    pub uploading_row: Option<String>,
+    /// Whether the menu offers its "Sign In…" action. True only while the
+    /// *running* daemon reports the stored credential rejected — the same
+    /// rule the headline follows, so the offer never contradicts it.
+    pub offer_sign_in: bool,
 }
 
 fn count(n: u64, singular: &str, plural: &str) -> String {
@@ -162,6 +196,11 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
             detail: "onedrive-hydration-dbus is not on the session bus, so the daemon's state \
                      is unknown. Files stay in OneDrive either way; nothing is lost."
                 .to_owned(),
+            placeholders_row: None,
+            downloading_row: None,
+            indexing_row: false,
+            uploading_row: None,
+            offer_sign_in: false,
         };
     };
     if !state.daemon_running {
@@ -180,8 +219,37 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
             sni_status: "Active",
             headline: "Sync daemon not running".to_owned(),
             detail,
+            // Held activity is not shown at all: a "Downloading" row over a
+            // dead process is the same wrong message as a held sign-in state.
+            placeholders_row: None,
+            downloading_row: None,
+            indexing_row: false,
+            uploading_row: None,
+            offer_sign_in: false,
         };
     }
+    // The one standing row: the placeholder population, count and all, zero
+    // included — the flyout keeps this counter on screen whenever the daemon
+    // runs, and it is what stops an idle menu from saying nothing at all.
+    let placeholders_row = Some(format!(
+        "Cloud-only placeholders: {}",
+        count(state.excluded, "file", "files")
+    ));
+    // The activity rows, shown while the daemon runs regardless of which
+    // headline outranks them — the flyout's grid makes the same choice: an
+    // exposure warning does not hide the fact that an upload is in flight.
+    let downloading_row = (state.downloading > 0)
+        .then(|| format!("Downloading {}", count(state.downloading, "file", "files")));
+    let indexing_row = state.indexing;
+    let uploading_row = match state.uploading.as_slice() {
+        [] => None,
+        [only] => Some(format!("Uploading {only}")),
+        many => Some(format!(
+            "Uploading {}",
+            count(many.len() as u64, "file", "files")
+        )),
+    };
+    let offer_sign_in = credential == CredentialState::Rejected;
     if state.exposures > 0 {
         let headline = if state.exposures == 1 {
             "1 mount bypasses hydration".to_owned()
@@ -211,6 +279,11 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
             sni_status: "NeedsAttention",
             headline,
             detail,
+            placeholders_row,
+            downloading_row,
+            indexing_row,
+            uploading_row,
+            offer_sign_in,
         };
     }
     if credential == CredentialState::Rejected {
@@ -234,6 +307,11 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
             sni_status: "NeedsAttention",
             headline: "Sign-in required".to_owned(),
             detail,
+            placeholders_row,
+            downloading_row,
+            indexing_row,
+            uploading_row,
+            offer_sign_in,
         };
     }
     if state.unsent > 0 {
@@ -247,6 +325,11 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
                 placeholders_line(state.excluded),
                 store_caveat(credential)
             ),
+            placeholders_row,
+            downloading_row,
+            indexing_row,
+            uploading_row,
+            offer_sign_in,
         };
     }
     Presentation {
@@ -258,6 +341,11 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
             placeholders_line(state.excluded),
             store_caveat(credential)
         ),
+        placeholders_row,
+        downloading_row,
+        indexing_row,
+        uploading_row,
+        offer_sign_in,
     }
 }
 
@@ -272,6 +360,11 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
 pub struct Opener {
     mount: Option<PathBuf>,
     open: Box<dyn Fn(&Path) + Send + Sync>,
+    /// How to open the sign-in URL `BeginEnrollment` returns; the binary
+    /// passes `xdg-open` here too. A separate closure from `open` because a
+    /// URL is not a `Path` and pretending it is one would invite the first
+    /// path normalisation to corrupt it.
+    open_url: Box<dyn Fn(&str) + Send + Sync>,
 }
 
 impl Opener {
@@ -460,13 +553,21 @@ impl StatusNotifierItem {
 
 /// Menu item ids. Stable whether or not the folder entry exists, so a host
 /// that cached ids across a layout change could never activate the wrong
-/// entry.
+/// entry. Append-only for the same reason: display order is the *children
+/// order* of `GetLayout`, never the id order, so a new entry takes the next
+/// free number wherever it is shown rather than renumbering entries a host
+/// may have cached.
 const MENU_ROOT: i32 = 0;
 const MENU_STATUS: i32 = 1;
 const MENU_SEPARATOR_A: i32 = 2;
 const MENU_FOLDER: i32 = 3;
 const MENU_SEPARATOR_B: i32 = 4;
 const MENU_QUIT: i32 = 5;
+const MENU_DOWNLOADING: i32 = 6;
+const MENU_INDEXING: i32 = 7;
+const MENU_UPLOADS: i32 = 8;
+const MENU_SIGN_IN: i32 = 9;
+const MENU_PLACEHOLDERS: i32 = 10;
 
 /// Events the interfaces push at the run loop.
 enum TrayEvent {
@@ -474,6 +575,14 @@ enum TrayEvent {
     State(DaemonState),
     /// A `CredentialStateChanged` signal arrived from the state service.
     Credential(CredentialState),
+    /// A `DownloadChanged` signal arrived: the in-flight fetch count moved.
+    Download(u64),
+    /// An `IndexingChanged` signal arrived: the delta pass started or ended.
+    Indexing(bool),
+    /// An `ActiveUploadsChanged` signal arrived: the in-flight upload list.
+    Uploads(Vec<String>),
+    /// The menu's Sign In entry was clicked.
+    SignIn,
     /// The state service left the bus.
     ServiceGone,
     /// The state service (re)appeared on the bus; re-read its properties.
@@ -489,58 +598,111 @@ enum TrayEvent {
 
 /// The object served at [`MENU_PATH`], speaking `com.canonical.dbusmenu`.
 ///
-/// The layout is fixed at startup — status line, optional folder entry,
-/// quit — and only the status line's label ever changes, announced through
-/// `ItemsPropertiesUpdated`. `Evict` is deliberately not here; see the
-/// module docs.
+/// The layout is fixed at startup — status line, activity rows, sign-in,
+/// optional folder entry, quit — and never changes shape: rows with nothing
+/// to say are hidden through the dbusmenu `visible` property, and every
+/// change travels as `ItemsPropertiesUpdated`. `Evict` is deliberately not
+/// here; see the module docs.
 pub struct DBusMenu {
-    headline: String,
+    presentation: Presentation,
     opener: Arc<Opener>,
     events: mpsc::Sender<TrayEvent>,
     revision: u32,
 }
 
+/// A menu row that is a statement, not an action: disabled always, hidden
+/// (with an empty label, so a host that applies properties in stages never
+/// flashes stale text) while it has nothing to say.
+fn statement_row(label: Option<&str>) -> Vec<(&'static str, Value<'static>)> {
+    vec![
+        ("label", Value::from(label.unwrap_or("").to_owned())),
+        ("enabled", Value::from(false)),
+        ("visible", Value::from(label.is_some())),
+    ]
+}
+
+/// The dbusmenu properties of one item, as a function of the current
+/// presentation. A free function rather than a method so
+/// [`apply_presentation`] can diff the previous presentation's answer
+/// against the new one and push exactly the items that changed. Defaults
+/// (`enabled`, `visible`, `type=standard`) are omitted for the static
+/// items, matching what measured menus send; the dynamic rows carry
+/// `visible` explicitly because it is the property doing the work.
+fn menu_item_properties(
+    presentation: &Presentation,
+    has_mount: bool,
+    id: i32,
+) -> Option<Vec<(&'static str, Value<'static>)>> {
+    match id {
+        MENU_ROOT => Some(vec![("children-display", Value::from("submenu"))]),
+        // The menu leads with the state, as the donor client's did. Not
+        // activatable — it is a statement, not an action.
+        MENU_STATUS => Some(vec![
+            ("label", Value::from(presentation.headline.clone())),
+            ("enabled", Value::from(false)),
+        ]),
+        MENU_PLACEHOLDERS => Some(statement_row(presentation.placeholders_row.as_deref())),
+        MENU_DOWNLOADING => Some(statement_row(presentation.downloading_row.as_deref())),
+        MENU_INDEXING => Some(statement_row(
+            presentation.indexing_row.then_some("Indexing…"),
+        )),
+        MENU_UPLOADS => Some(statement_row(presentation.uploading_row.as_deref())),
+        MENU_SEPARATOR_A => Some(vec![("type", Value::from("separator"))]),
+        // An action, unlike the rows above, so `enabled` follows `visible`:
+        // a hidden entry must not stay activatable through a cached id.
+        MENU_SIGN_IN => Some(vec![
+            ("label", Value::from("Sign In…")),
+            ("icon-name", Value::from("dialog-password")),
+            ("enabled", Value::from(presentation.offer_sign_in)),
+            ("visible", Value::from(presentation.offer_sign_in)),
+        ]),
+        MENU_FOLDER if has_mount => Some(vec![
+            ("label", Value::from("Open OneDrive Folder")),
+            ("icon-name", Value::from("folder")),
+        ]),
+        MENU_SEPARATOR_B if has_mount => Some(vec![("type", Value::from("separator"))]),
+        MENU_QUIT => Some(vec![
+            ("label", Value::from("Quit")),
+            ("icon-name", Value::from("application-exit")),
+        ]),
+        _ => None,
+    }
+}
+
+/// The dynamic items — the ones [`apply_presentation`] must diff. The
+/// separators, folder and quit entries never change and stay out of every
+/// update.
+const DYNAMIC_MENU_ITEMS: [i32; 6] = [
+    MENU_STATUS,
+    MENU_PLACEHOLDERS,
+    MENU_DOWNLOADING,
+    MENU_INDEXING,
+    MENU_UPLOADS,
+    MENU_SIGN_IN,
+];
+
 impl DBusMenu {
     /// The ids present in this menu, in display order.
     fn item_ids(&self) -> Vec<i32> {
+        let mut ids = vec![
+            MENU_STATUS,
+            MENU_PLACEHOLDERS,
+            MENU_DOWNLOADING,
+            MENU_INDEXING,
+            MENU_UPLOADS,
+            MENU_SEPARATOR_A,
+            MENU_SIGN_IN,
+        ];
         if self.opener.mount.is_some() {
-            vec![
-                MENU_STATUS,
-                MENU_SEPARATOR_A,
-                MENU_FOLDER,
-                MENU_SEPARATOR_B,
-                MENU_QUIT,
-            ]
-        } else {
-            vec![MENU_STATUS, MENU_SEPARATOR_A, MENU_QUIT]
+            ids.push(MENU_FOLDER);
+            ids.push(MENU_SEPARATOR_B);
         }
+        ids.push(MENU_QUIT);
+        ids
     }
 
-    /// The dbusmenu properties of one item. Defaults (`enabled`, `visible`,
-    /// `type=standard`) are omitted, matching what measured menus send.
     fn item_properties(&self, id: i32) -> Option<Vec<(&'static str, Value<'static>)>> {
-        match id {
-            MENU_ROOT => Some(vec![("children-display", Value::from("submenu"))]),
-            // The menu leads with the state, as the donor client's did. Not
-            // activatable — it is a statement, not an action.
-            MENU_STATUS => Some(vec![
-                ("label", Value::from(self.headline.clone())),
-                ("enabled", Value::from(false)),
-            ]),
-            MENU_SEPARATOR_A => Some(vec![("type", Value::from("separator"))]),
-            MENU_FOLDER if self.opener.mount.is_some() => Some(vec![
-                ("label", Value::from("Open OneDrive Folder")),
-                ("icon-name", Value::from("folder")),
-            ]),
-            MENU_SEPARATOR_B if self.opener.mount.is_some() => {
-                Some(vec![("type", Value::from("separator"))])
-            }
-            MENU_QUIT => Some(vec![
-                ("label", Value::from("Quit")),
-                ("icon-name", Value::from("application-exit")),
-            ]),
-            _ => None,
-        }
+        menu_item_properties(&self.presentation, self.opener.mount.is_some(), id)
     }
 }
 
@@ -673,6 +835,13 @@ impl DBusMenu {
         }
         match id {
             MENU_FOLDER => self.opener.open_mount(),
+            // Guarded on the offer, not just the id: a host holding a stale
+            // menu could still send the click after the daemon recovered,
+            // and enrollment on a healthy credential is a browser window
+            // nobody asked for.
+            MENU_SIGN_IN if self.presentation.offer_sign_in => {
+                drop(self.events.send(TrayEvent::SignIn));
+            }
             // The receiver only disappears while the run loop is already
             // returning, so a failed send needs no second announcement.
             MENU_QUIT => drop(self.events.send(TrayEvent::Quit)),
@@ -748,14 +917,23 @@ fn apply_presentation(
     drop(item);
 
     let mut menu_state = menu.get_mut();
-    if menu_state.headline != presentation.headline {
-        menu_state.headline = presentation.headline.clone();
+    let previous_menu = std::mem::replace(&mut menu_state.presentation, presentation.clone());
+    let has_mount = menu_state.opener.mount.is_some();
+    let mut updated = Vec::new();
+    for id in DYNAMIC_MENU_ITEMS {
+        let now = menu_item_properties(presentation, has_mount, id);
+        if menu_item_properties(&previous_menu, has_mount, id) == now {
+            continue;
+        }
+        if let Some(props) = now {
+            updated.push((
+                id,
+                owned_props(props).map_err(|e| zbus::Error::Failure(e.to_string()))?,
+            ));
+        }
+    }
+    if !updated.is_empty() {
         menu_state.revision += 1;
-        let updated = vec![(
-            MENU_STATUS,
-            owned_props(vec![("label", Value::from(presentation.headline.clone()))])
-                .map_err(|e| zbus::Error::Failure(e.to_string()))?,
-        )];
         let emitter = menu.signal_emitter();
         zbus::block_on(DBusMenu::items_properties_updated(
             emitter,
@@ -787,20 +965,16 @@ fn read_service_state(connection: &zbus::blocking::Connection) -> Option<DaemonS
         unsent: proxy.get_property::<u64>("Unsent").ok()?,
         excluded: proxy.get_property::<u64>("Excluded").ok()?,
         exposures: proxy.get_property::<u64>("Exposures").ok()?,
-        // The tray icon does not distinguish a downloading state — that count is
-        // the plasmoid's "Downloading N" row, read there straight off the
-        // Downloading property. Left zero here rather than read with `?`, which
-        // would make the whole cold read fail against a daemon too old to have
-        // the property.
-        downloading: 0,
-        // Same: the tray icon does not distinguish an indexing state; the
-        // plasmoid's "Indexing…" row reads the Indexing property directly.
-        indexing: false,
-        // The tray icon shows no per-file list; the plasmoid reads the
-        // Uploading property directly. Left empty here rather than read, which
-        // would make the whole cold read fail against a daemon too old to have
-        // the property.
-        uploading: Vec::new(),
+        // The activity trio feeds the menu's informational rows. Read with
+        // `unwrap_or`, never `?`: a state service too old to serve them
+        // still answers the four properties above, and this tray must keep
+        // working against it — absent activity reads as no activity, which
+        // is exactly what an older service would have shown anyway.
+        downloading: proxy.get_property::<u64>("Downloading").unwrap_or(0),
+        indexing: proxy.get_property::<bool>("Indexing").unwrap_or(false),
+        uploading: proxy
+            .get_property::<Vec<String>>("Uploading")
+            .unwrap_or_default(),
     })
 }
 
@@ -846,6 +1020,18 @@ pub struct TrayOptions {
     pub mount: Option<PathBuf>,
     /// How to open it; the binary passes `xdg-open`.
     pub open: Box<dyn Fn(&Path) + Send + Sync>,
+    /// How to open the sign-in URL `BeginEnrollment` hands back; the binary
+    /// passes `xdg-open` here too.
+    pub open_url: Box<dyn Fn(&str) + Send + Sync>,
+}
+
+/// Ask the state service to prepare a browser sign-in; the reply is the URL
+/// to open. Owner-checked on the service side, which also never launches the
+/// browser itself — the privileged flow stays in one process and the desktop
+/// action here.
+fn begin_enrollment(connection: &zbus::blocking::Connection) -> zbus::Result<String> {
+    zbus::blocking::Proxy::new(connection, BUS_NAME, OBJECT_PATH, INTERFACE)?
+        .call("BeginEnrollment", &())
 }
 
 /// Serve the tray until Quit is clicked. Returns an error naming the missing
@@ -871,7 +1057,11 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
     let opener = Arc::new(Opener {
         mount: options.mount,
         open: options.open,
+        open_url: options.open_url,
     });
+    // Kept past the object handoff for the Sign In click, whose enrollment
+    // call runs on its own thread with only the opener and a connection.
+    let sign_in_opener = Arc::clone(&opener);
     let object_server = connection.object_server();
     object_server
         .at(
@@ -886,7 +1076,7 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
         .at(
             MENU_PATH,
             DBusMenu {
-                headline: present(None, CredentialState::Unknown).headline,
+                presentation: present(None, CredentialState::Unknown),
                 opener,
                 events: events.clone(),
                 revision: 1,
@@ -917,6 +1107,18 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
         .map_err(io::Error::other)?;
     let credential_signals = state_proxy
         .receive_signal("CredentialStateChanged")
+        .map_err(io::Error::other)?;
+    // The activity trio ride their own signals — the wire contract grows by
+    // new members only, so `StateChanged` never carries them (see the dbus
+    // module). Each stream is drained on its own thread like the two above.
+    let download_signals = state_proxy
+        .receive_signal("DownloadChanged")
+        .map_err(io::Error::other)?;
+    let indexing_signals = state_proxy
+        .receive_signal("IndexingChanged")
+        .map_err(io::Error::other)?;
+    let uploads_signals = state_proxy
+        .receive_signal("ActiveUploadsChanged")
         .map_err(io::Error::other)?;
     let service_owner_changes = fdo
         .receive_name_owner_changed_with_args(&[(0, BUS_NAME)])
@@ -968,6 +1170,39 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
             }
         }
         drop(credential_events.send(TrayEvent::BusLost));
+    });
+    let download_events = events.clone();
+    thread::spawn(move || {
+        for message in download_signals {
+            if let Ok((downloading,)) = message.body().deserialize::<(u64,)>() {
+                if download_events.send(TrayEvent::Download(downloading)).is_err() {
+                    return;
+                }
+            }
+        }
+        drop(download_events.send(TrayEvent::BusLost));
+    });
+    let indexing_events = events.clone();
+    thread::spawn(move || {
+        for message in indexing_signals {
+            if let Ok((indexing,)) = message.body().deserialize::<(bool,)>() {
+                if indexing_events.send(TrayEvent::Indexing(indexing)).is_err() {
+                    return;
+                }
+            }
+        }
+        drop(indexing_events.send(TrayEvent::BusLost));
+    });
+    let uploads_events = events.clone();
+    thread::spawn(move || {
+        for message in uploads_signals {
+            if let Ok((uploading,)) = message.body().deserialize::<(Vec<String>,)>() {
+                if uploads_events.send(TrayEvent::Uploads(uploading)).is_err() {
+                    return;
+                }
+            }
+        }
+        drop(uploads_events.send(TrayEvent::BusLost));
     });
     let service_events = events.clone();
     thread::spawn(move || {
@@ -1031,10 +1266,61 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
 
     loop {
         match event_queue.recv() {
-            Ok(TrayEvent::State(state)) => {
+            Ok(TrayEvent::State(mut state)) => {
+                // StateChanged carries only the four counters; the activity
+                // trio ride their own signals. A state update must therefore
+                // inherit what those signals last said, not zero it — the
+                // threads above fill the fields they do not know with
+                // defaults, and overwriting would end every download row the
+                // moment an unsent count moved.
+                if let Some(previous) = &daemon_state {
+                    state.downloading = previous.downloading;
+                    state.indexing = previous.indexing;
+                    state.uploading = previous.uploading.clone();
+                }
                 daemon_state = Some(state);
                 apply_presentation(&sni, &menu, &present(daemon_state.clone(), credential))
                     .map_err(io::Error::other)?;
+            }
+            Ok(TrayEvent::Download(downloading)) => {
+                // Without a known state there is nothing to attach the count
+                // to; the cold read after the service returns will carry it.
+                if let Some(state) = &mut daemon_state {
+                    state.downloading = downloading;
+                    apply_presentation(&sni, &menu, &present(daemon_state.clone(), credential))
+                        .map_err(io::Error::other)?;
+                }
+            }
+            Ok(TrayEvent::Indexing(indexing)) => {
+                if let Some(state) = &mut daemon_state {
+                    state.indexing = indexing;
+                    apply_presentation(&sni, &menu, &present(daemon_state.clone(), credential))
+                        .map_err(io::Error::other)?;
+                }
+            }
+            Ok(TrayEvent::Uploads(uploading)) => {
+                if let Some(state) = &mut daemon_state {
+                    state.uploading = uploading;
+                    apply_presentation(&sni, &menu, &present(daemon_state.clone(), credential))
+                        .map_err(io::Error::other)?;
+                }
+            }
+            Ok(TrayEvent::SignIn) => {
+                // BeginEnrollment binds its loopback listener and returns
+                // the URL at once — the wait for the browser redirect lives
+                // in the service — but a bus round trip is still a round
+                // trip, and this loop must stay free to render state.
+                let connection = connection.clone();
+                let opener = Arc::clone(&sign_in_opener);
+                thread::spawn(move || match begin_enrollment(&connection) {
+                    Ok(url) => (opener.open_url)(&url),
+                    // EnrollmentBusy and EnrollmentUnavailable both land
+                    // here, quoted; a click that did nothing must leave a
+                    // trace, and stderr reaches the journal.
+                    Err(e) => eprintln!(
+                        "onedrive-hydration-tray: sign-in could not start: {e}"
+                    ),
+                });
             }
             Ok(TrayEvent::Credential(state)) => {
                 credential = state;
@@ -1301,17 +1587,24 @@ mod tests {
         }
     }
 
-    fn menu(mount: Option<PathBuf>) -> DBusMenu {
+    fn menu_showing(presentation: Presentation, mount: Option<PathBuf>) -> DBusMenu {
         let (events, _queue) = mpsc::channel();
         DBusMenu {
-            headline: "Up to date".to_owned(),
+            presentation,
             opener: Arc::new(Opener {
                 mount,
                 open: Box::new(|_| {}),
+                open_url: Box::new(|_| {}),
             }),
             events,
             revision: 1,
         }
+    }
+
+    fn menu(mount: Option<PathBuf>) -> DBusMenu {
+        // "Up to date", no activity — the quiet baseline the older tests
+        // were written against.
+        menu_showing(shown(Some(state(true, 0, 0, 0))), mount)
     }
 
     #[test]
@@ -1321,7 +1614,12 @@ mod tests {
             with.item_ids(),
             [
                 MENU_STATUS,
+                MENU_PLACEHOLDERS,
+                MENU_DOWNLOADING,
+                MENU_INDEXING,
+                MENU_UPLOADS,
                 MENU_SEPARATOR_A,
+                MENU_SIGN_IN,
                 MENU_FOLDER,
                 MENU_SEPARATOR_B,
                 MENU_QUIT
@@ -1330,7 +1628,16 @@ mod tests {
         let without = menu(None);
         assert_eq!(
             without.item_ids(),
-            [MENU_STATUS, MENU_SEPARATOR_A, MENU_QUIT]
+            [
+                MENU_STATUS,
+                MENU_PLACEHOLDERS,
+                MENU_DOWNLOADING,
+                MENU_INDEXING,
+                MENU_UPLOADS,
+                MENU_SEPARATOR_A,
+                MENU_SIGN_IN,
+                MENU_QUIT
+            ]
         );
         assert!(without.item_properties(MENU_FOLDER).is_none());
     }
@@ -1354,7 +1661,7 @@ mod tests {
         assert_eq!(revision, 1);
         assert_eq!(id, MENU_ROOT);
         assert!(props.contains_key("children-display"));
-        assert_eq!(children.len(), 5);
+        assert_eq!(children.len(), 10);
 
         // Depth 0 keeps the children out, per the dbusmenu contract.
         let (_, MenuLayout(_, _, children)) = m.get_layout(0, 0, Vec::new()).unwrap();
@@ -1372,10 +1679,11 @@ mod tests {
     fn quit_clicks_reach_the_run_loop_and_hovers_do_not() {
         let (events, queue) = mpsc::channel();
         let m = DBusMenu {
-            headline: String::new(),
+            presentation: shown(None),
             opener: Arc::new(Opener {
                 mount: None,
                 open: Box::new(|_| {}),
+                open_url: Box::new(|_| {}),
             }),
             events,
             revision: 1,
@@ -1393,10 +1701,11 @@ mod tests {
         let seen = Arc::clone(&opened);
         let (events, _queue) = mpsc::channel();
         let m = DBusMenu {
-            headline: String::new(),
+            presentation: shown(None),
             opener: Arc::new(Opener {
                 mount: Some(PathBuf::from("/home/user/OneDrive")),
                 open: Box::new(move |p| seen.lock().unwrap().push(p.to_owned())),
+                open_url: Box::new(|_| {}),
             }),
             events,
             revision: 1,
@@ -1407,5 +1716,146 @@ mod tests {
             *opened.lock().unwrap(),
             [PathBuf::from("/home/user/OneDrive")]
         );
+    }
+
+    fn activity(downloading: u64, indexing: bool, uploading: &[&str]) -> DaemonState {
+        DaemonState {
+            daemon_running: true,
+            unsent: uploading.len() as u64,
+            excluded: 0,
+            exposures: 0,
+            downloading,
+            indexing,
+            uploading: uploading.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn the_placeholders_row_stands_whenever_the_daemon_runs() {
+        // The flyout keeps this counter on screen, zero included; the menu
+        // does the same, so an idle menu still says something true.
+        assert_eq!(
+            shown(Some(state(true, 0, 0, 0))).placeholders_row.as_deref(),
+            Some("Cloud-only placeholders: 0 files")
+        );
+        assert_eq!(
+            shown(Some(state(true, 0, 146820, 0)))
+                .placeholders_row
+                .as_deref(),
+            Some("Cloud-only placeholders: 146820 files")
+        );
+        // Never over a stopped daemon or an absent service: a held counter
+        // is the same wrong message as held activity.
+        for p in [shown(None), shown(Some(state(false, 0, 7, 0)))] {
+            assert_eq!(p.placeholders_row, None, "{}", p.headline);
+        }
+    }
+
+    #[test]
+    fn activity_rows_say_what_is_in_flight_and_only_then() {
+        let quiet = shown(Some(state(true, 0, 0, 0)));
+        assert_eq!(quiet.downloading_row, None);
+        assert!(!quiet.indexing_row);
+        assert_eq!(quiet.uploading_row, None);
+
+        let busy = shown(Some(activity(1, true, &["Documents/report.docx"])));
+        assert_eq!(busy.downloading_row.as_deref(), Some("Downloading 1 file"));
+        assert!(busy.indexing_row);
+        // One file is named; several are counted — a menu row, not a list.
+        assert_eq!(
+            busy.uploading_row.as_deref(),
+            Some("Uploading Documents/report.docx")
+        );
+        let many = shown(Some(activity(2, false, &["a.txt", "b.txt", "c.txt"])));
+        assert_eq!(many.downloading_row.as_deref(), Some("Downloading 2 files"));
+        assert_eq!(many.uploading_row.as_deref(), Some("Uploading 3 files"));
+
+        // The rows survive the states that outrank them in the headline: the
+        // flyout's grid keeps showing work during an exposure warning, and so
+        // does the menu.
+        let exposed = shown(Some(DaemonState {
+            exposures: 1,
+            ..activity(1, false, &["a.txt"])
+        }));
+        assert_eq!(exposed.headline, "1 mount bypasses hydration");
+        assert_eq!(exposed.downloading_row.as_deref(), Some("Downloading 1 file"));
+
+        // Never on a stopped daemon or an absent service: held activity is
+        // the same wrong message as a held sign-in state.
+        for p in [shown(None), shown(Some(state(false, 0, 0, 0)))] {
+            assert_eq!(p.downloading_row, None, "{}", p.headline);
+            assert!(!p.indexing_row, "{}", p.headline);
+            assert_eq!(p.uploading_row, None, "{}", p.headline);
+        }
+    }
+
+    #[test]
+    fn hidden_rows_are_invisible_statements_and_visible_ones_still_statements() {
+        let quiet = menu(None);
+        for id in [MENU_DOWNLOADING, MENU_INDEXING, MENU_UPLOADS] {
+            let props = quiet.item_properties(id).unwrap();
+            assert!(
+                props
+                    .iter()
+                    .any(|(k, v)| *k == "visible" && *v == Value::from(false)),
+                "row {id} must be hidden while there is nothing to say"
+            );
+        }
+        let busy = menu_showing(shown(Some(activity(1, true, &["a.txt"]))), None);
+        for (id, label) in [
+            (MENU_DOWNLOADING, "Downloading 1 file"),
+            (MENU_INDEXING, "Indexing…"),
+            (MENU_UPLOADS, "Uploading a.txt"),
+        ] {
+            let props = busy.item_properties(id).unwrap();
+            assert!(props
+                .iter()
+                .any(|(k, v)| *k == "visible" && *v == Value::from(true)));
+            assert!(props
+                .iter()
+                .any(|(k, v)| *k == "label" && *v == Value::from(label)));
+            // A row is a statement, not an action, busy or not.
+            assert!(props
+                .iter()
+                .any(|(k, v)| *k == "enabled" && *v == Value::from(false)));
+        }
+    }
+
+    #[test]
+    fn sign_in_is_offered_only_while_the_running_daemon_reports_rejection() {
+        assert!(present(Some(state(true, 0, 0, 0)), CredentialState::Rejected).offer_sign_in);
+        // Everything else — healthy, unknown, unsaved, a stopped daemon, an
+        // absent service — offers nothing: the entry pairs with an
+        // instruction only the running daemon can stand behind.
+        for p in [
+            present(Some(state(true, 0, 0, 0)), CredentialState::Healthy),
+            present(Some(state(true, 0, 0, 0)), CredentialState::Unsaved),
+            present(Some(state(false, 0, 0, 0)), CredentialState::Rejected),
+            present(None, CredentialState::Rejected),
+        ] {
+            assert!(!p.offer_sign_in, "{}", p.headline);
+        }
+    }
+
+    #[test]
+    fn sign_in_clicks_reach_the_run_loop_only_while_offered() {
+        let (events, queue) = mpsc::channel();
+        let mut m = DBusMenu {
+            presentation: present(Some(state(true, 0, 0, 0)), CredentialState::Healthy),
+            opener: Arc::new(Opener {
+                mount: None,
+                open: Box::new(|_| {}),
+                open_url: Box::new(|_| {}),
+            }),
+            events,
+            revision: 1,
+        };
+        // A stale host clicking the hidden entry is ignored, not enrolled.
+        m.event(MENU_SIGN_IN, "clicked".to_owned(), Value::from(0i32), 0);
+        assert!(queue.try_recv().is_err());
+
+        m.presentation = present(Some(state(true, 0, 0, 0)), CredentialState::Rejected);
+        m.event(MENU_SIGN_IN, "clicked".to_owned(), Value::from(0i32), 0);
+        assert!(matches!(queue.try_recv(), Ok(TrayEvent::SignIn)));
     }
 }

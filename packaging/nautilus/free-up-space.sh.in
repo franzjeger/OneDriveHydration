@@ -1,0 +1,198 @@
+#!/bin/sh
+# GNOME Files' "Free Up Space" script: evict the selection back to
+# placeholders. The Dolphin action's sibling (packaging/dolphin), generated
+# the same way by install-nautilus-scripts.sh — it substitutes the sync root
+# and the control CLI's absolute path, because a Nautilus script has no
+# configuration file and no session to read one from, and one that guessed
+# either fact would guess it silently.
+#
+# One script serves files and folders both: Nautilus scripts cannot be
+# filtered by type at all (less even than KIO's mimetype filter), so the
+# selection arrives as it is and the branching lives here.
+set -u
+
+MOUNT='@MOUNT@'
+CTL='@CTL@'
+TITLE='OneDrive Hydration'
+
+# Nautilus spawns scripts with the session environment, but the same defaults
+# the Dolphin wrappers restore cost nothing and keep the two texts alike.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+
+human() {
+    # iec-i, not iec: the daemon counts bytes, and `--to=iec` would render
+    # 8192 as "8.0KB" — a decimal-looking label on a binary quantity.
+    if command -v numfmt >/dev/null 2>&1; then
+        numfmt --to=iec-i --suffix=B -- "$1"
+    else
+        printf '%s bytes' "$1"
+    fi
+}
+
+files_word() {
+    if [ "$1" -eq 1 ]; then printf 'file'; else printf 'files'; fi
+}
+
+# Nautilus runs scripts detached, so stdout is gone. Success is a passive
+# notification nobody has to dismiss; a refusal is modal, because the whole
+# point of quoting the daemon verbatim is that somebody reads it. zenity is
+# GNOME's kdialog; --no-markup because a daemon reply owes Pango nothing.
+say() {
+    urgency=$1
+    body=$2
+    if [ "$urgency" = ok ]; then
+        if command -v notify-send >/dev/null 2>&1; then
+            notify-send -a "$TITLE" -i onedrive-hydration "$TITLE" "$body" >/dev/null 2>&1 && return 0
+        fi
+    else
+        if command -v zenity >/dev/null 2>&1; then
+            zenity --error --no-markup --title "$TITLE" --text "$body" >/dev/null 2>&1 && return 0
+        fi
+        if command -v notify-send >/dev/null 2>&1; then
+            notify-send -u critical -a "$TITLE" -i onedrive-hydration "$TITLE" "$body" >/dev/null 2>&1 && return 0
+        fi
+    fi
+    printf '%s\n' "$body" >&2
+}
+
+# The selection: arguments, exactly like the Dolphin wrappers. Nautilus
+# passes the selected names as arguments with the working directory set to
+# their folder, so readlink -f below resolves them the same way.
+[ "$#" -gt 0 ] || exit 0
+
+freed=0
+ok=0
+skipped=0
+problems=''
+
+# Evict one file by its path relative to the sync root, folding the outcome
+# into the running totals. `via_check` is the absolute path a *direct* pin
+# may be released for — the file branch passes it, the folder branch passes
+# nothing because it released the folder's own pin already.
+evict_one() { # $1=rel  $2=abs  $3=via_check ('' to skip)
+    reply=$("$CTL" evict "$1" 2>&1) || true
+
+    # Free Up Space is the inverse of Keep on Device, so a file the user kept
+    # and now asks to free is un-kept: a DIRECTLY pinned file is unpinned and
+    # evicted again — the way "Free up space" clears "Always keep on this
+    # device" on Windows. A file pinned through an ANCESTOR folder is left
+    # alone: unpinning the file would not help (the folder's pin still
+    # protects it), so its refusal is shown verbatim and names the folder to
+    # free instead. The `via` path is read from the reply string, never from
+    # the file — no content is opened here. (The reply is a Rust Debug
+    # rendering; OneDrive forbids the characters Debug escapes in item names,
+    # so the byte-for-byte comparison is exact for every real placeholder,
+    # and a missed match only leaves the file kept — never frees the wrong
+    # one.)
+    if [ -n "$3" ]; then
+        case "$reply" in
+            *'Pinned { via:'*)
+                via=$(printf '%s' "$reply" | sed -n 's/.*via: "\(.*\)".*/\1/p')
+                if [ "$via" = "$3" ]; then
+                    "$CTL" unpin "$1" >/dev/null 2>&1 || true
+                    reply=$("$CTL" evict "$1" 2>&1) || true
+                fi
+                ;;
+        esac
+    fi
+
+    case "$reply" in
+        "reclaimed "*" bytes")
+            n=${reply#reclaimed }
+            n=${n% bytes}
+            case "$n" in
+                '' | *[!0-9]*) n=0 ;;
+            esac
+            freed=$((freed + n))
+            ok=$((ok + 1))
+            ;;
+        *)
+            # Every other answer is quoted verbatim, refusal and failure
+            # alike. The exit status cannot be used to notice them:
+            # onedrive-hydrationctl exits 1 only for `error:` and `unknown
+            # command:`, so a `kept:` refusal exits 0. A wrapper that trusted
+            # $? would count a kept file as freed while the daemon was
+            # explaining why it had not touched it.
+            problems="${problems}${2}
+    ${reply}
+"
+            ;;
+    esac
+}
+
+for f in "$@"; do
+    # readlink -f normalises and resolves symlinks. It is a path operation
+    # and reads no content, which matters more here than it looks: on this
+    # mount a read is what hydrates a placeholder, so a script that ran
+    # `file`, `head` or `cat` on its argument would fill the very file the
+    # user asked to empty. Nothing below ever opens the target.
+    abs=$(readlink -f -- "$f" 2>/dev/null) || abs=$f
+
+    # A Nautilus script appears on every selection on the system, so the
+    # containment lives here, exactly as it does for KIO.
+    case "$abs" in
+        "$MOUNT")
+            problems="${problems}${abs}
+    that is the sync folder itself, not a file in it
+"
+            continue
+            ;;
+        "$MOUNT"/*)
+            rel=${abs#"$MOUNT"/}
+            ;;
+        *)
+            problems="${problems}${abs}
+    not inside the sync folder ($MOUNT) — nothing was done
+"
+            continue
+            ;;
+    esac
+
+    if [ ! -d "$abs" ]; then
+        evict_one "$rel" "$abs" "$abs"
+        continue
+    fi
+
+    # A folder the user kept is pinned, and the daemon refuses to evict any
+    # file under a pinned ancestor. Release the folder's own pin first —
+    # unpinning a folder that was never pinned is a harmless refusal — then
+    # the per-file evicts below succeed.
+    "$CTL" unpin "$rel" >/dev/null 2>&1 || true
+
+    # Enumerate with find, skipping the framework's own names. A per-file
+    # refusal inside a folder sweep is expected in bulk (every placeholder
+    # answers kept), so those are counted rather than listed — a hundred
+    # verbatim "already cloud-only" lines is a dialog nobody reads. Fed by a
+    # here-doc rather than a pipe, so the running totals are not lost to a
+    # subshell.
+    while IFS= read -r child; do
+        [ -n "$child" ] || continue
+        before_problems=$problems
+        evict_one "${child#"$MOUNT"/}" "$child" ''
+        if [ "$problems" != "$before_problems" ]; then
+            problems=$before_problems
+            skipped=$((skipped + 1))
+        fi
+    done <<EOF
+$(find "$abs" -type f ! -name '.hydration-*' ! -name '.onedrive-*' 2>/dev/null)
+EOF
+done
+
+if [ -z "$problems" ]; then
+    msg="Freed $(human "$freed") from $ok $(files_word "$ok")."
+    if [ "$skipped" -gt 0 ]; then
+        msg="$msg $skipped $(files_word "$skipped") already cloud-only or kept."
+    fi
+    say ok "$msg"
+else
+    done_part=''
+    if [ "$ok" -gt 0 ]; then
+        done_part="Freed $(human "$freed") from $ok $(files_word "$ok").
+
+"
+    fi
+    say problem "${done_part}These were not freed:
+
+${problems}"
+fi
