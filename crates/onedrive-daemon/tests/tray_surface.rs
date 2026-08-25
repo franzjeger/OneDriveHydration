@@ -317,7 +317,7 @@ fn registers_reflects_every_state_and_serves_the_menu() {
     let decoded: Vec<_> = children.iter().map(decode_child).collect();
     assert_eq!(
         decoded.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-        [1, 6, 7, 8, 2, 9, 3, 4, 5]
+        [1, 10, 6, 7, 8, 2, 9, 3, 4, 5]
     );
     assert_eq!(
         label(&decoded[0].1).as_deref(),
@@ -325,10 +325,15 @@ fn registers_reflects_every_state_and_serves_the_menu() {
         "the status entry mirrors the current headline"
     );
     assert_eq!(
-        label(&decoded[6].1).as_deref(),
+        label(&decoded[1].1).as_deref(),
+        Some("Cloud-only placeholders: 7 files"),
+        "the standing counter is visible while the daemon runs"
+    );
+    assert_eq!(
+        label(&decoded[7].1).as_deref(),
         Some("Open OneDrive Folder")
     );
-    assert_eq!(label(&decoded[8].1).as_deref(), Some("Quit"));
+    assert_eq!(label(&decoded[9].1).as_deref(), Some("Quit"));
 
     // A folder click opens exactly the configured mount.
     menu.call::<_, _, ()>("Event", &(3i32, "clicked", Value::from(0i32), 0u32))
@@ -438,7 +443,7 @@ fn losing_the_state_service_is_shown_as_its_own_honest_state() {
     let menu = item_proxy(&observer, &tray, MENU_PATH, "com.canonical.dbusmenu");
     let (_, (_, _, children)) = get_layout(&menu);
     let ids: Vec<i32> = children.iter().map(|c| decode_child(c).0).collect();
-    assert_eq!(ids, [1, 6, 7, 8, 2, 9, 5]);
+    assert_eq!(ids, [1, 10, 6, 7, 8, 2, 9, 5]);
 
     quit(&observer, tray);
 }
