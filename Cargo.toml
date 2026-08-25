@@ -11,8 +11,8 @@ rust-version = "1.85"
 base64 = "0.23"
 blocking = "1"
 libc = "0.2"
-hydration-client = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "9a3567b593b45f6e5e182c0053159b2c69cdc8f6" }
-hydration-graph = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "9a3567b593b45f6e5e182c0053159b2c69cdc8f6", features = ["http"] }
+hydration-client = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "a4ade61823a57dc42e2852ad261bcdd0eeaf9270" }
+hydration-graph = { version = "=0.1.0", git = "https://github.com/franzjeger/HydrationAPI", rev = "a4ade61823a57dc42e2852ad261bcdd0eeaf9270", features = ["http"] }
 keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
 percent-encoding = "2"
 ring = "0.17"
