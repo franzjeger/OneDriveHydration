@@ -98,6 +98,11 @@ pub struct Presentation {
     pub headline: String,
     /// A sentence or two of tooltip body.
     pub detail: String,
+    /// The menu's "Cloud-only placeholders: …" row — the flyout's counter of
+    /// the same name, shown (count and all, zero included) whenever the
+    /// daemon runs. The one row that is not activity: it is what the mount
+    /// *is*, so an idle menu still says something true instead of nothing.
+    pub placeholders_row: Option<String>,
     /// The menu's "Downloading …" row, only while the daemon runs and a
     /// fetch is in flight. `None` hides the row (the dbusmenu `visible`
     /// property), so the layout keeps its fixed shape.
@@ -191,6 +196,7 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
             detail: "onedrive-hydration-dbus is not on the session bus, so the daemon's state \
                      is unknown. Files stay in OneDrive either way; nothing is lost."
                 .to_owned(),
+            placeholders_row: None,
             downloading_row: None,
             indexing_row: false,
             uploading_row: None,
@@ -215,12 +221,20 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
             detail,
             // Held activity is not shown at all: a "Downloading" row over a
             // dead process is the same wrong message as a held sign-in state.
+            placeholders_row: None,
             downloading_row: None,
             indexing_row: false,
             uploading_row: None,
             offer_sign_in: false,
         };
     }
+    // The one standing row: the placeholder population, count and all, zero
+    // included — the flyout keeps this counter on screen whenever the daemon
+    // runs, and it is what stops an idle menu from saying nothing at all.
+    let placeholders_row = Some(format!(
+        "Cloud-only placeholders: {}",
+        count(state.excluded, "file", "files")
+    ));
     // The activity rows, shown while the daemon runs regardless of which
     // headline outranks them — the flyout's grid makes the same choice: an
     // exposure warning does not hide the fact that an upload is in flight.
@@ -265,6 +279,7 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
             sni_status: "NeedsAttention",
             headline,
             detail,
+            placeholders_row,
             downloading_row,
             indexing_row,
             uploading_row,
@@ -292,6 +307,7 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
             sni_status: "NeedsAttention",
             headline: "Sign-in required".to_owned(),
             detail,
+            placeholders_row,
             downloading_row,
             indexing_row,
             uploading_row,
@@ -309,6 +325,7 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
                 placeholders_line(state.excluded),
                 store_caveat(credential)
             ),
+            placeholders_row,
             downloading_row,
             indexing_row,
             uploading_row,
@@ -324,6 +341,7 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
             placeholders_line(state.excluded),
             store_caveat(credential)
         ),
+        placeholders_row,
         downloading_row,
         indexing_row,
         uploading_row,
@@ -549,6 +567,7 @@ const MENU_DOWNLOADING: i32 = 6;
 const MENU_INDEXING: i32 = 7;
 const MENU_UPLOADS: i32 = 8;
 const MENU_SIGN_IN: i32 = 9;
+const MENU_PLACEHOLDERS: i32 = 10;
 
 /// Events the interfaces push at the run loop.
 enum TrayEvent {
@@ -622,6 +641,7 @@ fn menu_item_properties(
             ("label", Value::from(presentation.headline.clone())),
             ("enabled", Value::from(false)),
         ]),
+        MENU_PLACEHOLDERS => Some(statement_row(presentation.placeholders_row.as_deref())),
         MENU_DOWNLOADING => Some(statement_row(presentation.downloading_row.as_deref())),
         MENU_INDEXING => Some(statement_row(
             presentation.indexing_row.then_some("Indexing…"),
@@ -652,8 +672,9 @@ fn menu_item_properties(
 /// The dynamic items — the ones [`apply_presentation`] must diff. The
 /// separators, folder and quit entries never change and stay out of every
 /// update.
-const DYNAMIC_MENU_ITEMS: [i32; 5] = [
+const DYNAMIC_MENU_ITEMS: [i32; 6] = [
     MENU_STATUS,
+    MENU_PLACEHOLDERS,
     MENU_DOWNLOADING,
     MENU_INDEXING,
     MENU_UPLOADS,
@@ -665,6 +686,7 @@ impl DBusMenu {
     fn item_ids(&self) -> Vec<i32> {
         let mut ids = vec![
             MENU_STATUS,
+            MENU_PLACEHOLDERS,
             MENU_DOWNLOADING,
             MENU_INDEXING,
             MENU_UPLOADS,
@@ -1592,6 +1614,7 @@ mod tests {
             with.item_ids(),
             [
                 MENU_STATUS,
+                MENU_PLACEHOLDERS,
                 MENU_DOWNLOADING,
                 MENU_INDEXING,
                 MENU_UPLOADS,
@@ -1607,6 +1630,7 @@ mod tests {
             without.item_ids(),
             [
                 MENU_STATUS,
+                MENU_PLACEHOLDERS,
                 MENU_DOWNLOADING,
                 MENU_INDEXING,
                 MENU_UPLOADS,
@@ -1637,7 +1661,7 @@ mod tests {
         assert_eq!(revision, 1);
         assert_eq!(id, MENU_ROOT);
         assert!(props.contains_key("children-display"));
-        assert_eq!(children.len(), 9);
+        assert_eq!(children.len(), 10);
 
         // Depth 0 keeps the children out, per the dbusmenu contract.
         let (_, MenuLayout(_, _, children)) = m.get_layout(0, 0, Vec::new()).unwrap();
@@ -1703,6 +1727,27 @@ mod tests {
             downloading,
             indexing,
             uploading: uploading.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn the_placeholders_row_stands_whenever_the_daemon_runs() {
+        // The flyout keeps this counter on screen, zero included; the menu
+        // does the same, so an idle menu still says something true.
+        assert_eq!(
+            shown(Some(state(true, 0, 0, 0))).placeholders_row.as_deref(),
+            Some("Cloud-only placeholders: 0 files")
+        );
+        assert_eq!(
+            shown(Some(state(true, 0, 146820, 0)))
+                .placeholders_row
+                .as_deref(),
+            Some("Cloud-only placeholders: 146820 files")
+        );
+        // Never over a stopped daemon or an absent service: a held counter
+        // is the same wrong message as held activity.
+        for p in [shown(None), shown(Some(state(false, 0, 7, 0)))] {
+            assert_eq!(p.placeholders_row, None, "{}", p.headline);
         }
     }
 
