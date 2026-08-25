@@ -36,7 +36,7 @@ Type=simple
 # Service and appears nowhere here.
 ExecStart=@BIN@/onedrive-hydration-daemon run \
   --mount @MOUNT_USER@ \
-  --state-dir %h/.local/state/onedrive-hydration \
+  --state-dir %S/onedrive-hydration \
   --client-id @CLIENT_ID@ \
   --socket @SOCKET_USER@
 Restart=on-failure
@@ -47,7 +47,18 @@ RestartSec=5
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ReadWritePaths=@MOUNT_USER@ %h/.local/state/onedrive-hydration
+# StateDirectory=, never a bare ReadWritePaths= on the state dir: on a fresh
+# install nothing has created it — enrollment writes the credential to Secret
+# Service and touches no state directory — and ReadWritePaths= on a missing
+# path fails the sandbox assembly itself (226/NAMESPACE, measured 2026-08-25),
+# before the daemon exists to create the directory it was going to create.
+# systemd makes the StateDirectory before building the namespace and grants it
+# through ProtectSystem=strict. In a user unit it resolves under
+# $XDG_STATE_HOME, which is why ExecStart says %S and not %h/.local/state:
+# the directory systemd creates and the directory the daemon opens must be
+# the same fact, not two spellings that agree only when the variable is unset.
+StateDirectory=onedrive-hydration
+ReadWritePaths=@MOUNT_USER@
 RestrictRealtime=yes
 LockPersonality=yes
 
