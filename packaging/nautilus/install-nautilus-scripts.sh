@@ -92,6 +92,39 @@ printf 'is already open does not show them, close its Files windows (nautilus -q
 printf 'and reopen; whether a running Nautilus rescans the directory was not\n'
 printf 'measured here, so this does not claim it does.\n'
 
+# The better surface, where its dependency exists: top-level context-menu
+# entries need a MenuProvider extension, which needs nautilus-python — the
+# nautilus-dropbox trade. The extension only builds the menu; every click
+# runs the same generated wrappers above, so the protocol knowledge stays in
+# one place. Detected, not assumed: the probe is the import Nautilus itself
+# performs, so a false positive would have to break Nautilus first.
+if python3 -c 'import gi
+for v in ("4.1", "4.0"):
+    try:
+        gi.require_version("Nautilus", v)
+        break
+    except ValueError:
+        pass
+from gi.repository import Nautilus' 2>/dev/null; then
+    ext_dir=$data_home/nautilus-python/extensions
+    mkdir -p "$ext_dir"
+    sed -e "s|@MOUNT@|$mount|g" \
+        -e "s|@FREE@|$script_dir/Free Up Space|g" \
+        -e "s|@KEEP@|$script_dir/Keep on Device|g" \
+        "$here/onedrive-hydration-menu.py.in" > "$ext_dir/onedrive-hydration-menu.py.tmp"
+    mv -f "$ext_dir/onedrive-hydration-menu.py.tmp" "$ext_dir/onedrive-hydration-menu.py"
+    printf '\ninstalled the context-menu extension (nautilus-python found):\n'
+    printf '  %s/onedrive-hydration-menu.py\n' "$ext_dir"
+    printf 'Both actions appear directly in the right-click menu for selections\n'
+    printf 'inside the sync root. Extensions load at startup: quit Files\n'
+    printf '(nautilus -q) and reopen for it to take effect.\n'
+else
+    printf '\nno nautilus-python, so no top-level context-menu entries — only the\n'
+    printf 'Scripts submenu above. Install your distribution'"'"'s nautilus-python\n'
+    printf '(Arch: nautilus-python, Debian/Ubuntu: python3-nautilus, Fedora:\n'
+    printf 'nautilus-python) and re-run this script to add them.\n'
+fi
+
 if ! command -v zenity >/dev/null 2>&1 && ! command -v notify-send >/dev/null 2>&1; then
     printf '\nnote: neither zenity nor notify-send is installed, so the scripts have\n'
     printf 'nowhere to show their results — including the daemon reasons when it\n'

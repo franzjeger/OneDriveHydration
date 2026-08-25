@@ -15,6 +15,17 @@ mimetype filter — so the entries exist on every file on the system and the
 sync-root containment lives inside the scripts, which refuse anything
 outside the mount by name.
 
+Where **nautilus-python** is installed (Arch: `nautilus-python`,
+Debian/Ubuntu: `python3-nautilus`, Fedora: `nautilus-python`), the installer
+also drops a MenuProvider extension that puts both actions **directly in the
+right-click menu** — the nautilus-dropbox trade, and the one Nautilus
+surface that cannot be data. The extension only builds the menu (shown only
+for selections wholly inside the sync root, never for the root itself);
+every click runs the same generated wrapper the Scripts entry runs, so the
+daemon-protocol knowledge stays in one place, pinned by
+`nautilus_package.rs`. Extensions load at Nautilus startup: `nautilus -q`
+and reopen after installing.
+
 The rules the Dolphin wrappers established hold here byte for byte, because
 they come from the daemon, not the desktop:
 

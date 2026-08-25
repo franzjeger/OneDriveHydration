@@ -145,6 +145,43 @@ fn keep_on_device_never_opens_the_file_and_expands_folders_via_pending() {
 }
 
 #[test]
+fn the_menu_extension_only_builds_menus_and_delegates_to_the_wrappers() {
+    let ext = read("onedrive-hydration-menu.py.in");
+    // The extension must not speak the daemon's protocol itself — every
+    // action is one Popen of a generated wrapper, so the reply-prefix
+    // couplings pinned above stay in exactly one place.
+    assert!(ext.contains("subprocess.Popen"));
+    for verb in ["evict", "hydrate", "\"pin\"", "pending"] {
+        assert!(
+            !ext.contains(verb),
+            "the extension must not speak the control protocol itself ({verb})"
+        );
+    }
+    // The menu is filtered to the sync root — a courtesy the wrappers do not
+    // rely on (their own containment stays the rule) — and never offered on
+    // the root itself.
+    assert!(ext.contains("startswith(MOUNT"));
+    assert!(ext.contains("path == MOUNT"));
+}
+
+#[test]
+fn the_installer_treats_the_extension_as_conditional_and_says_why() {
+    let install = read("install-nautilus-scripts.sh");
+    // nautilus-python is detected by the same import Nautilus performs, and
+    // its absence downgrades to the Scripts submenu with the package named —
+    // never a refusal, because the scripts alone are a working install.
+    assert!(install.contains("from gi.repository import Nautilus"));
+    assert!(install.contains("onedrive-hydration-menu.py"));
+    assert!(
+        install.contains("no nautilus-python"),
+        "the fallback must be stated, not silent"
+    );
+    // Extensions load at Nautilus startup; the installer must say the
+    // restart is needed rather than let the entry look broken.
+    assert!(install.contains("nautilus -q"));
+}
+
+#[test]
 fn the_installer_script_refuses_before_it_generates() {
     let install = read("install-nautilus-scripts.sh");
     assert!(install.contains("refused: sync root"));
