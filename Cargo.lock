@@ -811,6 +811,7 @@ dependencies = [
  "hydration-client",
  "hydration-graph",
  "keyring",
+ "libc",
  "percent-encoding",
  "ring",
  "rustix",

@@ -11,6 +11,9 @@ blocking.workspace = true
 hydration-client.workspace = true
 hydration-graph.workspace = true
 keyring.workspace = true
+# Solely for signal(SIGPIPE, SIG_DFL) in onedrive-hydrationctl; rustix's
+# enabled feature set has no signal-disposition API.
+libc.workspace = true
 percent-encoding.workspace = true
 ring.workspace = true
 rustix.workspace = true

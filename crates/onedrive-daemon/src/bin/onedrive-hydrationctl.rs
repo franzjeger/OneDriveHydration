@@ -88,6 +88,15 @@ fn hydrate(path: &str) -> io::Result<u64> {
 }
 
 fn main() -> io::Result<()> {
+    // The Rust runtime masks SIGPIPE, so `status | head -1` ends not in the
+    // quiet death every other line-printing tool gets but in a panic from
+    // inside println! ("failed printing to stdout: Broken pipe", measured
+    // 2026-08-25). This binary's stdout is a pipe more often than a terminal —
+    // the Dolphin wrappers read its replies — and a reader that closes early
+    // is asking us to stop, not a bug to report. Restore the default before
+    // the first print.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+
     let mut args = std::env::args().skip(1);
     let mut socket = None;
     let mut positional = Vec::new();
