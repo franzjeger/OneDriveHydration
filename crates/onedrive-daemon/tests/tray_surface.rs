@@ -127,24 +127,24 @@ impl StateService {
     }
 
     fn publish(&self, daemon_running: bool, unsent: u64, excluded: u64, exposures: u64) {
+        self.publish_full(DaemonState {
+            daemon_running,
+            unsent,
+            excluded,
+            exposures,
+            downloading: 0,
+            indexing: false,
+            uploading: Vec::new(),
+        });
+    }
+
+    fn publish_full(&self, state: DaemonState) {
         let iface = self
             .connection
             .object_server()
             .interface::<_, ControlSurface>(OBJECT_PATH)
             .unwrap();
-        publish_state(
-            &iface,
-            DaemonState {
-                daemon_running,
-                unsent,
-                excluded,
-                exposures,
-                downloading: 0,
-                indexing: false,
-                uploading: Vec::new(),
-            },
-        )
-        .unwrap();
+        publish_state(&iface, state).unwrap();
     }
 }
 
@@ -168,6 +168,7 @@ fn start_tray(bus: &PrivateBus, mount: Option<PathBuf>) -> Tray {
                         .send(path.to_owned())
                         .expect("the test holds the receiver");
                 }),
+                open_url: Box::new(|_| {}),
             },
         )
     });
@@ -307,13 +308,16 @@ fn registers_reflects_every_state_and_serves_the_menu() {
     assert!(tip.text.contains("3 changes are still waiting to upload"));
 
     // The menu: full shape from the root, the way the measured host asks.
+    // Display order, not id order — the activity rows (6,7,8) sit under the
+    // status line and the sign-in entry (9) with the actions, on their
+    // append-only ids.
     let menu = item_proxy(&observer, &tray, MENU_PATH, "com.canonical.dbusmenu");
     let (_, (root_id, _, children)) = get_layout(&menu);
     assert_eq!(root_id, 0);
     let decoded: Vec<_> = children.iter().map(decode_child).collect();
     assert_eq!(
         decoded.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-        [1, 2, 3, 4, 5]
+        [1, 6, 7, 8, 2, 9, 3, 4, 5]
     );
     assert_eq!(
         label(&decoded[0].1).as_deref(),
@@ -321,15 +325,47 @@ fn registers_reflects_every_state_and_serves_the_menu() {
         "the status entry mirrors the current headline"
     );
     assert_eq!(
-        label(&decoded[2].1).as_deref(),
+        label(&decoded[6].1).as_deref(),
         Some("Open OneDrive Folder")
     );
-    assert_eq!(label(&decoded[4].1).as_deref(), Some("Quit"));
+    assert_eq!(label(&decoded[8].1).as_deref(), Some("Quit"));
 
     // A folder click opens exactly the configured mount.
     menu.call::<_, _, ()>("Event", &(3i32, "clicked", Value::from(0i32), 0u32))
         .unwrap();
     assert_eq!(tray.opened.recv_timeout(WAIT).unwrap(), mount.path());
+
+    // Activity lights the menu's informational rows, pushed through
+    // ItemsPropertiesUpdated on the same signals the flyout reads.
+    let mut menu_updates = menu.receive_signal("ItemsPropertiesUpdated").unwrap();
+    service.publish_full(DaemonState {
+        daemon_running: true,
+        unsent: 3,
+        excluded: 7,
+        exposures: 2,
+        downloading: 1,
+        indexing: true,
+        uploading: vec!["Documents/report.docx".to_owned()],
+    });
+    // The three activity signals each land as their own update; wait until
+    // the layout shows all three rows rather than assuming their order.
+    let mut rows = HashMap::new();
+    for _ in 0..8 {
+        let (_, (_, _, children)) = get_layout(&menu);
+        rows = children
+            .iter()
+            .map(decode_child)
+            .map(|(id, props)| (id, label(&props)))
+            .collect();
+        let visible = |id: i32| rows.get(&id).and_then(|l| l.clone()).unwrap_or_default();
+        if !visible(6).is_empty() && !visible(7).is_empty() && !visible(8).is_empty() {
+            break;
+        }
+        menu_updates.next().unwrap();
+    }
+    assert_eq!(rows[&6].as_deref(), Some("Downloading 1 file"));
+    assert_eq!(rows[&7].as_deref(), Some("Indexing…"));
+    assert_eq!(rows[&8].as_deref(), Some("Uploading Documents/report.docx"));
 
     quit(&observer, tray);
 }
@@ -397,11 +433,12 @@ fn losing_the_state_service_is_shown_as_its_own_honest_state() {
         ICON_SYNCED
     );
 
-    // Without a mount the menu carries no folder entry: ids 1, 2, 5.
+    // Without a mount the menu carries no folder entry; the activity rows
+    // and the sign-in entry keep their append-only ids in display order.
     let menu = item_proxy(&observer, &tray, MENU_PATH, "com.canonical.dbusmenu");
     let (_, (_, _, children)) = get_layout(&menu);
     let ids: Vec<i32> = children.iter().map(|c| decode_child(c).0).collect();
-    assert_eq!(ids, [1, 2, 5]);
+    assert_eq!(ids, [1, 6, 7, 8, 2, 9, 5]);
 
     quit(&observer, tray);
 }

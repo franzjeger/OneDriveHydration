@@ -48,6 +48,14 @@ fn main() -> io::Result<()> {
                     );
                 }
             }),
+            // The sign-in URL takes the same road as the folder: the browser
+            // belongs to the desktop, and xdg-open is how the desktop is
+            // asked for it.
+            open_url: Box::new(|url| {
+                if let Err(e) = std::process::Command::new("xdg-open").arg(url).spawn() {
+                    eprintln!("onedrive-hydration-tray: could not run xdg-open {url}: {e}");
+                }
+            }),
         },
     )
 }
