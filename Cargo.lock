@@ -581,7 +581,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 [[package]]
 name = "hydration-client"
 version = "0.1.0"
-source = "git+https://github.com/franzjeger/HydrationAPI?rev=a4ade61823a57dc42e2852ad261bcdd0eeaf9270#a4ade61823a57dc42e2852ad261bcdd0eeaf9270"
+source = "git+https://github.com/franzjeger/HydrationAPI?rev=381a9f7ffdcf941d4d2238890e098525993e541e#381a9f7ffdcf941d4d2238890e098525993e541e"
 dependencies = [
  "hydration-protocol",
  "libc",
@@ -590,7 +590,7 @@ dependencies = [
 [[package]]
 name = "hydration-graph"
 version = "0.1.0"
-source = "git+https://github.com/franzjeger/HydrationAPI?rev=a4ade61823a57dc42e2852ad261bcdd0eeaf9270#a4ade61823a57dc42e2852ad261bcdd0eeaf9270"
+source = "git+https://github.com/franzjeger/HydrationAPI?rev=381a9f7ffdcf941d4d2238890e098525993e541e#381a9f7ffdcf941d4d2238890e098525993e541e"
 dependencies = [
  "httpdate",
  "hydration-client",
@@ -603,7 +603,7 @@ dependencies = [
 [[package]]
 name = "hydration-protocol"
 version = "0.1.0"
-source = "git+https://github.com/franzjeger/HydrationAPI?rev=a4ade61823a57dc42e2852ad261bcdd0eeaf9270#a4ade61823a57dc42e2852ad261bcdd0eeaf9270"
+source = "git+https://github.com/franzjeger/HydrationAPI?rev=381a9f7ffdcf941d4d2238890e098525993e541e#381a9f7ffdcf941d4d2238890e098525993e541e"
 dependencies = [
  "libc",
  "serde",

@@ -11,6 +11,7 @@ fn usage() -> ! {
          onedrive-hydrationctl [--socket <path>] pin <relative-path>\n  \
          onedrive-hydrationctl [--socket <path>] unpin <relative-path>\n  \
          onedrive-hydrationctl [--socket <path>] pending <relative-dir>\n  \
+         onedrive-hydrationctl [--socket <path>] prefetch <relative-dir>\n  \
          onedrive-hydrationctl hydrate <path>"
     );
     std::process::exit(2)
@@ -18,10 +19,13 @@ fn usage() -> ! {
 
 /// What the arguments asked for.
 ///
-/// `status`/`evict`/`pin`/`unpin`/`pending` are lines the daemon answers — the
-/// paths are relative to the sync root, which is where the daemon resolves and
-/// confines them (`pending <dir>` lists the dehydrated files under a directory,
-/// which a caller then hydrates one at a time). `hydrate` is the exception:
+/// `status`/`evict`/`pin`/`unpin`/`pending`/`prefetch` are lines the daemon
+/// answers — the paths are relative to the sync root, which is where the daemon
+/// resolves and confines them (`pending <dir>` lists the dehydrated files under
+/// a directory, which a caller then hydrates one at a time; `prefetch <dir>`
+/// announces those coming reads so the daemon can have the content verified and
+/// in memory before each one arrives — advisory, and free to skip). `hydrate`
+/// is the exception:
 /// hydration happens by *reading* the file,
 /// and that read must run in a process that is neither the daemon (which serves
 /// the bytes) nor the helper (which answers the pre-content event) — §6a-ter. So
@@ -41,7 +45,8 @@ fn parse(positional: &[String]) -> Action {
             Action::Forward(format!("evict {path}"))
         }
         [verb, path]
-            if (verb == "pin" || verb == "unpin" || verb == "pending") && !path.is_empty() =>
+            if (verb == "pin" || verb == "unpin" || verb == "pending" || verb == "prefetch")
+                && !path.is_empty() =>
         {
             Action::Forward(format!("{verb} {path}"))
         }
@@ -180,6 +185,12 @@ mod tests {
         assert_eq!(
             parse(&v(&["pending", "Photos"])),
             Action::Forward("pending Photos".to_owned())
+        );
+        // And `prefetch`: the announcement reads nothing here — the daemon
+        // warms its own memory, and the reads still happen in `hydrate`.
+        assert_eq!(
+            parse(&v(&["prefetch", "Photos"])),
+            Action::Forward("prefetch Photos".to_owned())
         );
     }
 

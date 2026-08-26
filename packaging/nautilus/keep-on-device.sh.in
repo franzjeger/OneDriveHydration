@@ -225,6 +225,12 @@ for f in "$@"; do
         IFS=$_oifs
         done_n=0
         if [ "$total" -gt 0 ]; then
+            # Announce the coming reads, so the daemon fetches and verifies
+            # the content on parallel connections while the loop below pulls
+            # the files one at a time. Purely advisory — a daemon without the
+            # verb answers "unknown command:" and the loop is exactly as fast
+            # as it was before the verb existed — so the reply is discarded.
+            "$CTL" prefetch "$rel" >/dev/null 2>&1 || true
             progress_start "$total" \
                 "Downloading $total $(files_word "$total") from \"$(basename -- "$abs")\"…"
         fi
