@@ -345,6 +345,14 @@ fn the_keep_on_device_wrapper_expands_a_directory_via_pending() {
         !wrapper.contains("| while"),
         "a pipe into while runs in a subshell and would lose the running totals"
     );
+    // Before the pull begins, the coming reads are announced with `prefetch`,
+    // so the daemon fetches and verifies ahead of the one-at-a-time loop.
+    // Advisory by design: the reply is discarded, and an older daemon that
+    // answers "unknown command:" costs nothing but the speed-up.
+    assert!(
+        wrapper.contains("\"$CTL\" prefetch \"$rel\""),
+        "the folder pull must announce the coming reads to the daemon"
+    );
 }
 
 #[test]
