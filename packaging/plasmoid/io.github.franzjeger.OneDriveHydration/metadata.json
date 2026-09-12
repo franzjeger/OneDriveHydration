@@ -7,7 +7,7 @@
             }
         ],
         "Category": "System Information",
-        "Description": "OneDrive sync state, exposure warnings, and space reclaim",
+        "Description": "OneDrive sync status, file activity, and storage actions",
         "EnabledByDefault": true,
         "Icon": "onedrive-hydration",
         "Id": "io.github.franzjeger.OneDriveHydration",

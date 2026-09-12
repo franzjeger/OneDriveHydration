@@ -458,3 +458,40 @@ fn evict_fails_closed_when_the_caller_cannot_be_attributed() {
     assert_eq!(name, "io.github.franzjeger.OneDriveHydration.Error.Denied");
     assert!(detail.contains("no bus identity"), "detail: {detail}");
 }
+
+#[test]
+fn folder_selection_round_trips_as_a_string_array_and_preserves_daemon_errors() {
+    let scratch = tempfile::tempdir().unwrap();
+    let socket = scratch.path().join("ctl");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        for (expected, reply) in [
+            (
+                r#"selection ["Folder with spaces","a#b"]"#,
+                "selection saved",
+            ),
+            (
+                r#"selection [".."]"#,
+                "error: Choose a folder relative to the OneDrive root",
+            ),
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            assert_eq!(line.trim(), expected);
+            writeln!(stream, "{reply}").unwrap();
+        }
+    });
+    let (_service, client) = served_pair(ControlSurface::new(socket, None));
+    let proxy = tray_proxy(&client);
+    proxy
+        .call::<_, _, ()>("SetFolderSelection", &(vec!["Folder with spaces", "a#b"],))
+        .unwrap();
+    let error = proxy
+        .call::<_, _, ()>("SetFolderSelection", &(vec![".."],))
+        .unwrap_err();
+    assert!(error.to_string().contains("relative to the OneDrive root"));
+    server.join().unwrap();
+}

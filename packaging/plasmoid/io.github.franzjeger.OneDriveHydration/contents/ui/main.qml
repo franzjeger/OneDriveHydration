@@ -3,35 +3,15 @@
     SPDX-License-Identifier: MIT OR Apache-2.0
 */
 
-// The flyout: a plasmoid loaded by plasmashell into the system tray, talking
-// to the same session-bus surface the tray binary subscribes to. Shipped as
-// data, not linked as a dependency — on this desktop the panel is already a
-// QML host, so the flyout costs no Rust toolkit and inherits the native look.
-//
-// The daemon's control socket stays the single authority and the state
-// service its only translator; this file holds nothing but the last state it
-// was told. It subscribes to `StateChanged` and never polls: one cold
-// property read when the service (re)appears on the bus — the documented
-// complement to the signal, because a freshly started service does not
-// signal a state it considers unchanged — and signals from then on. This
-// mirrors crates/onedrive-daemon/src/tray.rs, and the user-facing wording
-// here is copied from tray.rs verbatim; tests/plasmoid_package.rs pins the
-// two against each other so they cannot drift apart silently.
-//
-// Two facts about org.kde.plasma.workspace.dbus, measured on this machine's
-// Plasma 6.7.4 against the real service (not taken from documentation):
-//
-//  * D-Bus `t` (u64) values arrive in QML as value-type wrappers with a
-//    `.value` property, not as numbers — `Excluded` decodes as
-//    `{value: 167652}`. Everything numeric goes through `u64()` below;
-//    without it the panel would render "[object Object]" file counts.
-//  * A D-Bus signal reaches QML through a plain function named
-//    `dbus<SignalName>` on a SignalWatcher — there is no receivedSignal
-//    signal to attach to. The subscription survives a service restart
-//    without re-arming (Qt tracks the name's owner), also measured.
+// Signal-driven state from the existing D-Bus service. Presentation.js holds
+// the status rules mirrored by the Rust tray; ActivityLog keeps observed
+// starts and confirmed user actions for this Plasma session only.
+// D-Bus u64 values may arrive as wrappers with a `value` property.
+// SignalWatcher dispatches members to functions named dbus<Member>.
 
 pragma ComponentBehavior: Bound
 
+import "Presentation.js" as Status
 import QtCore
 import QtQuick
 import org.kde.coreaddons as KCoreAddons
@@ -49,23 +29,90 @@ PlasmoidItem {
     readonly property string busName: "io.github.franzjeger.OneDriveHydration"
     readonly property string objectPath: "/io/github/franzjeger/OneDriveHydration"
 
-    // Icon names from packaging/icons, resolved through the hicolor theme.
-    // The same constants as tray.rs; the package test pins them too.
-    readonly property string iconSynced: "onedrive-hydration-synced"
-    readonly property string iconUnsent: "onedrive-hydration-unsent"
-    readonly property string iconExposed: "onedrive-hydration-exposed"
-    readonly property string iconStopped: "onedrive-hydration-stopped"
-
     // What the daemon last told us, exactly as it said it. The counters keep
     // their last-seen values while daemonRunning is false — zeroing them
     // would manufacture a state the daemon never sent — and are only ever
     // *quoted* in that case, never presented as current.
+    property var desktop: ({})
+    property var availabilityJob: ({})
+    property int jobGeneration: 0
+    function applyJob(text, expand) {
+        jobGeneration++;
+        let next;
+        try { next = JSON.parse(text || "{}"); } catch (_) { next = ({}); }
+        if (expand && next.operation && next.id !== availabilityJob.id) root.expanded = true;
+        if (expand && next.operation && !next.running && (availabilityJob.running || next.id !== availabilityJob.id)) {
+            const failed = (next.errors || []).length > 0;
+            activityLog.add(next.operation === "keep" ? "Keep on Device" : "Free Up Space",
+                next.cancelled ? "Cancelled" : failed ? "Finished with errors" : "Finished: " + next.done + " files processed",
+                failed ? "dialog-error" : "emblem-success", "");
+        }
+        availabilityJob = next;
+    }
+    function cancelJob() { control("CancelAvailabilityJob", []); }
+    function keepFolder(url) {
+        const path = decodeURIComponent(url.toString().replace(/^file:\/\//, ""));
+        if (!path.startsWith(mountPath + "/")) { controlResult = "Choose a folder inside OneDrive."; return; }
+        control("StartAvailabilityJob", ["keep", [path]]);
+    }
+    property int desktopGeneration: 0
+    readonly property bool desktopAvailable: activityVisible && desktop.available === true
+    readonly property bool paused: desktopAvailable && desktop.paused === true
+    readonly property var transferState: desktopAvailable ? (desktop.transfers || {}) : ({})
+    readonly property var excludedFolders: desktopAvailable ? (desktop.selection || []) : []
+    function setFolderSelection(paths) { control("SetFolderSelection", [paths]); }
+    readonly property var syncIssues: desktopAvailable ? (desktop.issues || []) : []
+    readonly property var queueRows: desktopAvailable ? (desktop.queue || []) : []
+    readonly property var account: desktopAvailable ? (desktop.account || {}) : ({})
+    property var conflictReview: ({})
+    readonly property var resolution: desktopAvailable ? (desktop.resolution || {}) : ({})
+    readonly property bool canResolve: desktopAvailable && desktop.can_resolve === true
+    function reviewConflict(path) {
+        if (controlBusy) return;
+        controlBusy = true; controlResult = "";
+        DBus.SessionBus.asyncCall({service: busName, path: objectPath, iface: busName,
+            member: "ReviewConflict", arguments: [path]}, reply => {
+                controlBusy = false;
+                try { conflictReview = JSON.parse(reply.value); } catch (_) { controlResult = "Could not read the version comparison."; }
+            }, reply => { controlBusy = false; controlResult = reply.error.message; });
+    }
+    function resolveConflict(token, choice) { control("ResolveConflict", [token, choice]); }
+    function openRecovery(path) {
+        if (path && path.startsWith("/") && !path.startsWith(mountPath + "/")) Qt.openUrlExternally(Status.fileUrl(path));
+    }
+    function openCloudVersion(url) { if (url && url.startsWith("https://")) Qt.openUrlExternally(url); }
+    property DBus.uint64 pauseArgument: 0
+    property bool controlBusy: false
+    property string controlResult: ""
+    function applyDesktop(text) {
+        desktopGeneration++;
+        try { desktop = JSON.parse(text || "{}"); if (desktop.resolution && desktop.resolution.running) conflictReview = ({}); } catch (_) { desktop = ({}); }
+    }
+    function control(member, args) {
+        if (controlBusy) return;
+        controlBusy = true;
+        controlResult = "";
+        // DBusMessage.signature describes the reply, not the input. Preserve
+        // uint64 via the QML value type so JavaScript does not send a double.
+        if (member === "Pause") pauseArgument = args[0];
+        DBus.SessionBus.asyncCall({service: busName, path: objectPath, iface: busName,
+            member: member, arguments: member === "Pause" ? [pauseArgument] : args}, () => {
+                controlBusy = false;
+                readAll();
+            }, error => {
+                controlBusy = false;
+                controlResult = error.error.message;
+            });
+    }
+    function setPause(seconds) { control("Pause", [seconds]); }
+    function retryPending() { control("RetryPending", []); }
+    function formatBytes(value) { return Status.bytes(value); }
+    function openWeb() {
+        const url = account.webUrl || "https://onedrive.com";
+        if (url.startsWith("https://")) Qt.openUrlExternally(url);
+    }
     property bool daemonRunning: false
     property double unsent: 0
-    // The high-water mark of unsent since it was last zero — the denominator for
-    // the flyout's upload progress bar, so a fresh batch starts empty and fills to
-    // full as it uploads. Reset to 0 in applyState whenever unsent reaches 0.
-    property double unsentPeak: 0
     property double excluded: 0
     property double exposures: 0
     // Fetches the client is serving right now, from the Downloading property and
@@ -74,7 +121,7 @@ PlasmoidItem {
     property double downloading: 0
 
     // Whether the daemon is applying a cloud delta right now — the tray's
-    // "Indexing…". Its own Indexing property and IndexingChanged signal, the same
+    // "Checking for changes". Its own Indexing property and IndexingChanged signal, the same
     // pattern as downloading, so a service too old to expose it is simply not
     // shown as indexing (u64(undefined)/false).
     property bool indexing: false
@@ -97,13 +144,15 @@ PlasmoidItem {
     // message. Mirrors tray.rs's present().
     property string credentialState: "unknown"
     property bool enrollmentBusy: false
+    property bool enrollmentPrepared: false
+    property bool enrollmentQueryPending: false
     property string enrollmentResult: ""
     property bool enrollmentFailed: false
 
     Timer {
         interval: 1000
         repeat: true
-        running: root.enrollmentBusy
+        running: root.enrollmentBusy && root.enrollmentPrepared
         onTriggered: root.readEnrollmentStatus()
     }
 
@@ -131,14 +180,14 @@ PlasmoidItem {
     // path the deployment documents. Trailing slashes are stripped so the
     // eviction prefix check below cannot be fooled by "/path//".
     readonly property string mountPath: {
-        let configured = Plasmoid.configuration.mountPath;
+        let configured = root.desktopAvailable && root.desktop.mount ? root.desktop.mount : Plasmoid.configuration.mountPath;
         if (!configured || configured === "") {
             const home = StandardPaths.writableLocation(StandardPaths.HomeLocation).toString();
             configured = home.replace(/^file:\/\//, "") + "/OneDrive";
         }
         return configured.replace(/\/+$/, "");
     }
-    readonly property url mountUrl: "file://" + encodeURI(root.mountPath)
+    readonly property url mountUrl: Status.fileUrl(root.mountPath)
 
     // Eviction state lives here rather than in the flyout page because the
     // popup's contents can be destroyed while a call is in flight; the
@@ -158,143 +207,59 @@ PlasmoidItem {
     toolTipMainText: root.presentation.headline
     toolTipSubText: root.presentation.detail
 
-    // "1 change" / "3 changes", matching tray.rs's count().
-    function count(n, singular, plural) {
-        return n === 1 ? n + " " + singular : n + " " + plural;
+    readonly property bool serviceAvailable: serviceWatcher.registered
+    readonly property bool activityVisible: stateKnown && daemonRunning
+    readonly property bool working: activityVisible && (downloading > 0 || indexing || activeUploads.length > 0)
+    readonly property var presentation: Status.present(root)
+
+    function count(n, singular, plural) { return Status.count(n, singular, plural); }
+
+    // Only observed starts and confirmed user actions are recorded. An upload
+    // disappearing from the active list is not proof that it succeeded.
+    readonly property var recentActivity: {
+        const history = (desktop.history || []).map(function(e) {
+            return {title: e.path ? e.path.split("/").pop() : "OneDrive", detail: e.detail,
+                icon: e.status === "error" ? "dialog-error" : "emblem-success", path: e.path || "", time: new Date(e.time * 1000)};
+        });
+        return history.concat(activityLog.entries).sort((a, b) => b.time - a.time).slice(0, 100);
+    }
+    ActivityLog { id: activityLog }
+    function addActivity(title, detail, icon, relative) {
+        activityLog.add(title, detail, icon, relative);
     }
 
-    // The placeholders line shown while things are healthy; tray.rs's
-    // placeholders_line().
-    function placeholdersLine(excluded) {
-        if (excluded === 0) {
-            return "";
-        }
-        if (excluded === 1) {
-            return " 1 file is a cloud-only placeholder.";
-        }
-        return " " + excluded + " files are cloud-only placeholders.";
+    function openContainingFolder(relative) {
+        const url = Status.parentUrl(root.mountPath, relative);
+        if (url) Qt.openUrlExternally(url);
     }
 
-    // The caveat appended to every running-state detail while the daemon
-    // reports it cannot persist the rotated sign-in; tray.rs's
-    // store_caveat(). A caveat and not a state: syncing still works, so the
-    // headline stays about the work.
-    function storeCaveat() {
-        if (root.credentialState !== "unsaved") {
-            return "";
-        }
-        return " Warning: the sign-in works but its rotation could not be saved to Linux Secret Service — unlock the keyring, or the next daemon start may require signing in again.";
-    }
+    function configure() { Plasmoid.internalAction("configure").trigger(); }
 
-    // Map what we know to what the panel shows — tray.rs's present(), with
-    // one extra transient state for the asynchronous read gap. Precedence,
-    // most urgent knowledge first: service absent, state not yet read,
-    // daemon not running, exposures (the §6.4a hazard — another mount
-    // reaches the sync files and reads through it bypass hydration entirely,
-    // the one condition a person can discover nowhere else), sign-in
-    // required (the service has conclusively refused the stored sign-in;
-    // exposure still outranks it because exposure corrupts reads happening
-    // now, while a dead sign-in stops sync loudly), unsent work, synced.
-    // Wording rule for the stopped states: the files are *unreachable*, not
-    // lost, and the text says so explicitly — and the signed-out state
-    // follows the same rule, naming both enrollment routes that work on this
-    // deployment. The explicit flyout button starts the browser flow through
-    // the owner-checked D-Bus method; it is never triggered automatically.
-    readonly property var presentation: {
-        if (!serviceWatcher.registered) {
-            return {
-                icon: root.iconStopped,
-                attention: false,
-                headline: "State service not running",
-                detail: "onedrive-hydration-dbus is not on the session bus, so the daemon's state is unknown. Files stay in OneDrive either way; nothing is lost."
-            };
-        }
-        if (!root.stateKnown) {
-            return {
-                icon: root.iconStopped,
-                attention: false,
-                headline: "Reading sync state…",
-                detail: "The state service is on the session bus; waiting for its first answer."
-            };
-        }
-        if (!root.daemonRunning) {
-            let detail = "Cloud-only files cannot be opened until the daemon starts. Nothing is lost: every synced file is still in OneDrive.";
-            if (root.exposures > 0) {
-                // Held, last-seen knowledge — quoted as such, not shown as live.
-                detail += " Before it stopped, " + root.count(root.exposures, "other mount", "other mounts") + " exposed the sync folder.";
-            }
-            return {
-                icon: root.iconStopped,
-                attention: false,
-                headline: "Sync daemon not running",
-                detail: detail
-            };
-        }
-        if (root.exposures > 0) {
-            let detail = root.exposures === 1
-                ? "Another mount exposes the OneDrive files, and reads through it bypass hydration: they can silently return empty placeholder content. Unmount the extra path to close the bypass."
-                : "Other mounts expose the OneDrive files, and reads through them bypass hydration: they can silently return empty placeholder content. Unmount the extra paths to close the bypass.";
-            if (root.unsent > 0) {
-                detail += " " + root.count(root.unsent, "change is", "changes are") + " still waiting to upload.";
-            }
-            detail += root.storeCaveat();
-            return {
-                icon: root.iconExposed,
-                attention: true,
-                headline: root.exposures === 1
-                    ? "1 mount bypasses hydration"
-                    : root.exposures + " mounts bypass hydration",
-                detail: detail
-            };
-        }
-        if (root.credentialState === "rejected") {
-            let detail = "OneDrive no longer accepts this machine's saved sign-in — it was revoked, expired, or invalidated by a password change or policy. Nothing is lost: every synced file is still in OneDrive, but nothing syncs and cloud-only files cannot be opened until you sign in again. Use the flyout's Sign in button, or run onedrive-hydration-daemon reauth from a terminal; browser PKCE works when Conditional Access blocks device code, and the daemon restarts onto the new sign-in.";
-            if (root.unsent > 0) {
-                detail += " " + root.count(root.unsent, "change is", "changes are") + " still waiting to upload.";
-            }
-            return {
-                icon: root.iconStopped,
-                attention: true,
-                headline: "Sign-in required",
-                detail: detail
-            };
-        }
-        if (root.unsent > 0) {
-            return {
-                icon: root.iconUnsent,
-                attention: false,
-                headline: root.count(root.unsent, "change", "changes") + " to upload",
-                detail: root.count(root.unsent, "local change has", "local changes have") + " not reached OneDrive yet." + root.placeholdersLine(root.excluded) + root.storeCaveat()
-            };
-        }
-        return {
-            icon: root.iconSynced,
-            attention: false,
-            headline: "Up to date",
-            detail: "All local changes are in OneDrive." + root.placeholdersLine(root.excluded) + root.storeCaveat()
-        };
+    Timer {
+        id: enrollmentFeedback
+        interval: 6000
+        onTriggered: { if (!root.enrollmentFailed) root.enrollmentResult = ""; }
     }
 
     // D-Bus `t` values decode as {value: n} wrappers; see the module note.
     function u64(v) {
-        return (v !== null && typeof v === "object" && "value" in v) ? Number(v.value) : Number(v);
+        const number = Number((v !== null && typeof v === "object" && "value" in v) ? v.value : v);
+        return Number.isFinite(number) && number >= 0 ? number : 0;
     }
 
     function applyState(daemonRunning, unsent, excluded, exposures) {
         root.stateGeneration += 1;
         root.daemonRunning = daemonRunning;
         root.unsent = unsent;
-        // Track the batch high-water mark for the upload bar: grow it with unsent,
-        // reset to zero when the queue drains, so the bar measures the CURRENT
-        // upload rather than all of history. A fresh batch then starts near empty
-        // and fills to full as the count falls.
-        if (unsent > root.unsentPeak)
-            root.unsentPeak = unsent;
-        else if (unsent === 0)
-            root.unsentPeak = 0;
         root.excluded = excluded;
         root.exposures = exposures;
         root.stateKnown = true;
+        if (!daemonRunning) {
+            root.downloading = 0;
+            root.indexing = false;
+            root.activeUploads = [];
+            activityLog.observeUploads([], false);
+        }
     }
 
     // D-Bus strings arrive plain, but tolerate the {value: x} wrapper the
@@ -310,11 +275,6 @@ PlasmoidItem {
     function applyCredential(value) {
         root.credentialGeneration += 1;
         root.credentialState = root.credentialWord(value);
-        if (root.credentialState === "healthy") {
-            root.enrollmentBusy = false;
-            root.enrollmentFailed = false;
-            root.enrollmentResult = "Sign-in completed.";
-        }
     }
 
     // The download count travels on its own signal, so it carries its own
@@ -338,13 +298,14 @@ PlasmoidItem {
     // GetAll is in flight must win over the older read. A D-Bus `as` (array of
     // strings) decodes to a JS array of strings; against a service too old to
     // expose the property it is undefined, which normalizes to an empty list.
-    function applyUploads(value) {
+    function applyUploads(value, recordActivity = true) {
         root.uploadGeneration += 1;
         root.activeUploads = (value !== null && typeof value === "object" && "value" in value)
             ? value.value
             : value;
         if (!Array.isArray(root.activeUploads))
             root.activeUploads = [];
+        activityLog.observeUploads(root.activeUploads, recordActivity && root.activityVisible);
     }
 
     // The one cold read. Each half is applied only if no signal of its kind
@@ -358,6 +319,8 @@ PlasmoidItem {
         const downloadGeneration = root.downloadGeneration;
         const indexGeneration = root.indexGeneration;
         const uploadGeneration = root.uploadGeneration;
+        const desktopGeneration = root.desktopGeneration;
+        const jobGeneration = root.jobGeneration;
         DBus.SessionBus.asyncCall({
             service: root.busName,
             path: root.objectPath,
@@ -366,6 +329,8 @@ PlasmoidItem {
             arguments: [root.busName]
         }, reply => {
             const properties = reply.value;
+            if (jobGeneration === root.jobGeneration) root.applyJob(properties.AvailabilityJob, false);
+            if (desktopGeneration === root.desktopGeneration) root.applyDesktop(properties.DesktopState);
             if (stateGeneration === root.stateGeneration) {
                 root.applyState(
                     properties.DaemonRunning === true,
@@ -389,7 +354,7 @@ PlasmoidItem {
             // Uploading may be undefined against a service too old to expose it;
             // applyUploads normalizes that to an empty list.
             if (uploadGeneration === root.uploadGeneration) {
-                root.applyUploads(properties.Uploading);
+                root.applyUploads(properties.Uploading, false);
             }
         }, error => {
             // The service raced away between appearing and answering; the
@@ -403,6 +368,9 @@ PlasmoidItem {
     }
 
     function beginEnrollment() {
+        if (root.enrollmentBusy) return;
+        root.enrollmentPrepared = false;
+        enrollmentFeedback.stop();
         root.enrollmentBusy = true;
         root.enrollmentFailed = false;
         root.enrollmentResult = "Preparing secure browser sign-in…";
@@ -413,6 +381,7 @@ PlasmoidItem {
             member: "BeginEnrollment",
             arguments: []
         }, reply => {
+            root.enrollmentPrepared = true;
             root.enrollmentResult = "Finish signing in in your browser.";
             if (!Qt.openUrlExternally(reply.value)) {
                 root.enrollmentFailed = true;
@@ -426,6 +395,8 @@ PlasmoidItem {
     }
 
     function readEnrollmentStatus() {
+        if (!root.enrollmentBusy || !root.enrollmentPrepared || root.enrollmentQueryPending) return;
+        root.enrollmentQueryPending = true;
         DBus.SessionBus.asyncCall({
             service: root.busName,
             path: root.objectPath,
@@ -433,17 +404,21 @@ PlasmoidItem {
             member: "EnrollmentStatus",
             arguments: []
         }, reply => {
+            root.enrollmentQueryPending = false;
             const status = reply.value;
             if (status === "complete") {
                 root.enrollmentBusy = false;
                 root.enrollmentFailed = false;
                 root.enrollmentResult = "Sign-in completed.";
+                root.addActivity("Signed in to OneDrive", "Sign-in completed", "system-log-in", "");
+                enrollmentFeedback.restart();
             } else if (typeof status === "string" && status.startsWith("error:")) {
                 root.enrollmentBusy = false;
                 root.enrollmentFailed = true;
                 root.enrollmentResult = status.slice("error:".length);
             }
         }, reply => {
+            root.enrollmentQueryPending = false;
             root.enrollmentBusy = false;
             root.enrollmentFailed = true;
             root.enrollmentResult = reply.error.message;
@@ -484,6 +459,7 @@ PlasmoidItem {
             root.evictFailed = false;
             const bytes = root.u64(reply.value);
             root.evictResult = "Freed " + KCoreAddons.Format.formatByteSize(bytes) + " — \"" + relative + "\" is cloud-only again.";
+            root.addActivity(relative.split("/").pop(), "Freed " + KCoreAddons.Format.formatByteSize(bytes), "folder-cloud", relative);
         }, reply => {
             // Both callbacks receive the pending reply; a rejection carries
             // its error at reply.error (measured — the callback's argument
@@ -506,6 +482,15 @@ PlasmoidItem {
                 root.readAll();
             } else {
                 root.stateKnown = false;
+                root.stateGeneration += 1;
+                root.credentialGeneration += 1;
+                root.downloadGeneration += 1;
+                root.indexGeneration += 1;
+                root.uploadGeneration += 1;
+                root.downloading = 0;
+                root.indexing = false;
+                root.activeUploads = [];
+                activityLog.observeUploads([], false);
                 // Nothing the service asserted survives it leaving the bus.
                 root.applyCredential("unknown");
             }
@@ -554,6 +539,9 @@ PlasmoidItem {
 
         // The per-file upload list, on its own member for the same reason: an
         // older flyout has no dbusActiveUploadsChanged and ignores it.
+        function dbusDesktopChanged(state) { root.applyDesktop(state); }
+        function dbusAvailabilityJobChanged(state) { root.applyJob(state, true); }
+
         function dbusActiveUploadsChanged(paths) {
             root.applyUploads(paths);
         }

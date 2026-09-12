@@ -11,7 +11,8 @@ security boundary.
 
 ## Status
 
-Feature-complete release candidate. The product includes browser/PKCE and device-code
+Release candidate with a working sync foundation and an evolving desktop interface.
+The product includes browser/PKCE and device-code
 enrollment backed directly by Linux Secret Service, automatic primary-drive discovery,
 streamed and resumable downloads, the fail-closed HydrationAPI sync engine, a validated
 systemd installer, a signal-driven D-Bus service and tray, an in-product Plasma flyout with
@@ -19,11 +20,16 @@ sign-in and eviction, and Dolphin actions plus live file-status overlays. Tagged
 publish a revision-matched, checksummed payload containing every runtime binary and desktop
 asset.
 
-The remaining release gate is external validation, not an unimplemented product feature:
-the complete two-device/process-restart matrix in the
+Production readiness still requires external validation: the complete two-device/process-restart
+matrix in the
 [sync correctness gate](docs/SYNC-ACCEPTANCE.md) must pass against a dedicated,
 non-production Microsoft 365 tenant. Until that evidence exists, treat this as a release
 candidate rather than entrusting it with the only copy of user data.
+
+The Plasma activity center shows account/quota, pause/resume, the actual upload queue,
+confirmed upload history and unresolved sync issues. Dolphin has scoped context menus,
+metadata-only status icons and availability jobs with progress and cancellation. The
+remaining setup and sync-acceptance work is tracked in the roadmap.
 
 ## Design rules
 
@@ -129,15 +135,13 @@ cargo run -p onedrive-hydration-daemon --bin onedrive-hydration-tray -- \
 ```
 
 It is a StatusNotifierItem with a DBusMenu, spoken directly over zbus with no GUI toolkit:
-the panel draws everything. Five states are shown, in order of precedence: daemon (or state
-service) not running, another mount exposing the sync files (`Exposures > 0`, rendered as
-`NeedsAttention` because reads through such a mount bypass hydration), sign-in required
-(`CredentialState` `rejected`, also `NeedsAttention`: nothing is lost, and the tooltip
-points to `onedrive-hydration-daemon reauth`; the toolkit-free tray cannot launch a browser),
-changes waiting to upload, and up to date. An `unsaved` credential is
-a warning sentence appended to whichever of the running states is shown, not a state of
-its own: syncing still works, and the sentence says what breaks (the next restart) and
-what to do (unlock the keyring). Icons resolve by name from the hicolor theme; run
+the panel draws everything. The status prioritizes an unavailable or stopped service,
+unsafe extra mounts,
+sign-in requirements, active transfers/cloud checks, queued changes, then up to date.
+Active work has a distinct sync icon; queued work does not imply upload progress.
+An unsaved credential adds a short instruction to unlock the keyring. The menu's
+"Hide tray icon (sync continues)" action closes only the tray process.
+Icons resolve by name from the hicolor theme; run
 `packaging/icons/install-icons.sh` once per user to install them. On a desktop with no
 `org.kde.StatusNotifierWatcher` the binary exits saying so, and when the watcher restarts —
 plasmashell and kded6 do — it re-registers by itself. Eviction is deliberately absent from
@@ -158,21 +162,14 @@ is told to the installer — `--tray sni|plasmoid|none` — and never detected: 
 draws only under plasmashell, the binary wherever there is a `StatusNotifierWatcher`, and
 which desktop the user logs into is not a fact at install time. Say nothing and it defaults
 to the binary, unless the applet is already installed for that user, which is refused until
-one of the three is named. What the flyout does not show is what the D-Bus surface cannot
-yet say — account identity, quota, byte totals, and recent activity — and
-`packaging/plasmoid/README.md` keeps that list honestly.
+one of the three is named. The flyout also reads the versioned `DesktopState` snapshot
+and listens for desktop/job updates; see `packaging/plasmoid/README.md` for its limits.
 
-Dolphin gets the same trade a third time: "Free Up Space" and "Keep on Device" are KIO
-servicemenus — `.desktop` files and shell wrappers, no toolkit — installed per user with
-`packaging/dolphin/install-servicemenu.sh`. Both work for files; folder actions walk the
-daemon's pending list without opening placeholder content. KIO cannot filter a menu entry by path
-was measured, not assumed, so the entry exists on every file and the wrapper refuses,
-naming the sync root, for anything outside it; and because `onedrive-hydrationctl` exits
-zero when the daemon *declines* an eviction, the wrapper reads the reply rather than the
-exit status, with a test deriving those reply prefixes from the Rust parser. Per-file
-cloud-only/on-device emblems are supplied by the compiled KF6 `KOverlayIconPlugin` under
-`packaging/dolphin/overlay`; it reads xattr metadata only and pushes targeted refreshes after
-either action.
+Dolphin receives scoped "Free Up Space" and "Keep on Device" actions from a compiled
+KF6 plugin. It accepts mixed file/folder selections only inside configured sync roots and
+starts availability jobs through D-Bus. A separate overlay plugin reads xattr metadata
+without opening file contents and refreshes visible status after changes. Standalone
+`.desktop` menus and shell wrappers remain available as a fallback.
 
 ## Release payload
 
@@ -190,3 +187,62 @@ sudo /usr/local/bin/onedrive-hydration-install install \
 The installer performs the kernel, filesystem, mount-namespace, exposure, fstab, Secret
 Service, and payload checks before writing units. See
 [packaging/systemd](packaging/systemd/README.md) for storage preparation and refusal details.
+
+### Complete Plasma desktop installation
+
+After installing the matching daemon binaries, run
+`packaging/install-desktop.sh --mount ~/OneDrive --bin-dir /usr/local/bin` as the
+session user. It installs the panel, icons and both Dolphin plugins, removes the
+static fallback menus to avoid duplicates, and checks the installed components.
+Use the same command with `--check` to diagnose a deployment. Restart Dolphin to
+load new compiled plugins. The installer needs the KF6 build toolchain and
+`kdialog` for fallback action dialogs.
+
+The panel now reads the daemon's connected folder, account/quota snapshot, actual
+upload queue (including last error and retry delay), and persistent confirmed
+upload outcomes. Pause lasts two hours or until Resume/restart; an executing
+background pass can finish, and explicit file reads still download. Retry retains
+the sync engine's conditional-write checks. Availability jobs started from Dolphin
+appear in the panel, including mixed file/folder selections, per-file failures,
+processed-file progress and cancellation after the current file. Their byte count
+measures local storage made available/reclaimed, not network throughput.
+
+A filled green circle distinguishes Keep on Device from a downloaded file's green
+square. Folder badges still inspect a bounded amount of metadata and use unknown
+status when they cannot establish a complete answer. Dolphin content previews can
+hydrate placeholders; settings explain how to disable them without changing the
+user's global preference automatically.
+
+Unresolved engine refusals remain visible even when the upload queue is empty.
+Ambiguous online-only files containing local bytes are flagged for review, without a
+local-open shortcut; availability jobs covering those paths are refused. A warning
+badge distinguishes a modified online-only file from an ordinary cloud placeholder.
+
+The transfer view uses HTTP payload bytes and a measured rolling rate. Retries count
+as traffic; sending the last byte is not a confirmed upload. A partial download is
+labelled as part of a file. Totals reset with the daemon, and are not billing or
+network-interface counters.
+
+Choose folders excludes selected local subtrees from background sync on this device.
+Existing files remain in place, and opening an online-only file can still download
+it. Excluded items have a grey pause badge. Re-including a subtree requests a fresh
+cloud listing, with the normal local-change protections. This is not a cloud-only
+folder browser or a command to remove local copies.
+
+Review versions offers Keep both, Use local version and Use cloud version for
+primary-drive file conflicts. Incomplete online-only data offers only the cloud
+choice. A one-use review expires after ten minutes; a separate confirmation applies
+the selected choice. The service pauses background changes while resolving, retains
+a read-only Btrfs recovery snapshot outside the sync mount, and checks local identity
+and cloud version again. Use local also saves the replaced cloud content and uploads
+conditionally; Keep both creates a separate cloud sibling. Concurrent local changes
+are preserved. Confirmed cloud operations and their recovery data survive a later
+failure, and the result links to the recovery folder.
+
+Resolution requires Btrfs and a state directory on the same filesystem. It refuses
+when it cannot secure a snapshot; it never backs up an ambiguous live placeholder
+by reading or reflinking it. Recovery snapshots retain the whole tree and can retain
+storage until removed. Completed job status is session state; durable recovery files
+remain after restart. Shared-library, folder, deleted-remote and missing-identity
+conflicts still require separate handling. These local tests do not satisfy the
+external tenant/two-device acceptance gate.

@@ -411,6 +411,9 @@ pub enum Error {
 pub struct ControlSurface {
     socket: PathBuf,
     state: DaemonState,
+    desktop_state: String,
+    jobs: Arc<crate::jobs::Jobs>,
+    last_job: String,
     /// The sign-in conclusion from the daemon's auth-state socket, or
     /// [`CredentialState::Unknown`] when no running daemon has asserted one.
     /// Unlike the counters it is never held across a daemon restart; see
@@ -432,6 +435,9 @@ impl ControlSurface {
         Self {
             socket,
             state: DaemonState::default(),
+            desktop_state: "{}".into(),
+            jobs: Arc::new(crate::jobs::Jobs::default()),
+            last_job: String::new(),
             credential: CredentialState::Unknown,
             require_uid,
             enrollment_client_id: None,
@@ -486,6 +492,172 @@ impl ControlSurface {
 
 #[zbus::interface(name = "io.github.franzjeger.OneDriveHydration")]
 impl ControlSurface {
+    #[zbus(property)]
+    fn desktop_state(&self) -> &str {
+        &self.desktop_state
+    }
+
+    #[zbus(property)]
+    fn availability_job(&self) -> String {
+        self.jobs.snapshot()
+    }
+
+    #[zbus(signal, name = "AvailabilityJobChanged")]
+    pub async fn job_changed(emitter: &SignalEmitter<'_>, state: &str) -> zbus::Result<()>;
+
+    async fn review_conflict(
+        &self,
+        path: String,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> Result<String, Error> {
+        self.caller_permitted(&header, connection).await?;
+        let socket = self.socket.clone();
+        let reply =
+            blocking::unblock(move || crate::control_request(&socket, &format!("review {path}")))
+                .await
+                .map_err(|e| Error::Failed(e.to_string()))?;
+        if reply.starts_with("error:") {
+            Err(Error::Failed(reply))
+        } else {
+            Ok(reply)
+        }
+    }
+    async fn resolve_conflict(
+        &self,
+        token: String,
+        choice: String,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> Result<(), Error> {
+        self.caller_permitted(&header, connection).await?;
+        if self.jobs.is_running() {
+            return Err(Error::Failed(
+                "Finish or cancel the availability job first".into(),
+            ));
+        }
+        if token.len() != 32
+            || !token.bytes().all(|b| b.is_ascii_hexdigit())
+            || !matches!(choice.as_str(), "local" | "cloud" | "both")
+        {
+            return Err(Error::Failed(
+                "Review the versions before choosing one".into(),
+            ));
+        }
+        let socket = self.socket.clone();
+        let reply = blocking::unblock(move || {
+            crate::control_request(&socket, &format!("resolve {token} {choice}"))
+        })
+        .await
+        .map_err(|e| Error::Failed(e.to_string()))?;
+        if reply.trim() == "resolution started" {
+            Ok(())
+        } else {
+            Err(Error::Failed(reply))
+        }
+    }
+
+    async fn set_folder_selection(
+        &self,
+        paths: Vec<String>,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> Result<(), Error> {
+        self.caller_permitted(&header, connection).await?;
+        if self.jobs.is_running() {
+            return Err(Error::Failed(
+                "Finish or cancel the current availability job first".into(),
+            ));
+        }
+        let socket = self.socket.clone();
+        let payload = serde_json::to_string(&paths).map_err(|e| Error::Failed(e.to_string()))?;
+        let reply = blocking::unblock(move || {
+            crate::control_request(&socket, &format!("selection {payload}"))
+        })
+        .await
+        .map_err(|e| Error::Failed(e.to_string()))?;
+        if reply.trim() == "selection saved" {
+            Ok(())
+        } else {
+            Err(Error::Failed(reply))
+        }
+    }
+
+    async fn start_availability_job(
+        &self,
+        operation: String,
+        paths: Vec<String>,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> Result<(), Error> {
+        self.caller_permitted(&header, connection).await?;
+        let state: serde_json::Value =
+            serde_json::from_str(&self.desktop_state).map_err(|e| Error::Failed(e.to_string()))?;
+        let mount = state
+            .get("mount")
+            .and_then(|v| v.as_str())
+            .filter(|_| self.state.daemon_running)
+            .ok_or_else(|| {
+                Error::DaemonUnavailable("Wait for the sync service to connect".into())
+            })?;
+        crate::jobs::check_issues(std::path::Path::new(mount), &paths, &state)
+            .map_err(|e| Error::Failed(e.to_string()))?;
+        self.jobs
+            .start(self.socket.clone(), mount.into(), paths, operation)
+            .map_err(|e| Error::Failed(e.to_string()))
+    }
+
+    async fn cancel_availability_job(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> Result<(), Error> {
+        self.caller_permitted(&header, connection).await?;
+        self.jobs.cancel();
+        Ok(())
+    }
+
+    #[zbus(signal, name = "DesktopChanged")]
+    pub async fn desktop_changed(emitter: &SignalEmitter<'_>, state: &str) -> zbus::Result<()>;
+
+    async fn pause(
+        &self,
+        seconds: u64,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> Result<(), Error> {
+        self.caller_permitted(&header, connection).await?;
+        if seconds > 86400 {
+            return Err(Error::Failed("Pause is limited to 24 hours".into()));
+        }
+        let socket = self.socket.clone();
+        let reply =
+            blocking::unblock(move || control_request(&socket, &format!("pause {seconds}")))
+                .await
+                .map_err(|e| Error::Failed(e.to_string()))?;
+        if reply.trim() == "ok" {
+            Ok(())
+        } else {
+            Err(Error::Failed(reply))
+        }
+    }
+
+    async fn retry_pending(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> Result<(), Error> {
+        self.caller_permitted(&header, connection).await?;
+        let socket = self.socket.clone();
+        let reply = blocking::unblock(move || control_request(&socket, "retry"))
+            .await
+            .map_err(|e| Error::Failed(e.to_string()))?;
+        if reply.trim() == "ok" {
+            Ok(())
+        } else {
+            Err(Error::Failed(reply))
+        }
+    }
     /// Whether the daemon's control socket currently answers. When this is
     /// false the counter properties hold their last-seen values.
     #[zbus(property)]
@@ -823,6 +995,30 @@ pub fn publish_state(
             ControlSurface::active_uploads_changed(emitter, uploading).await?;
         }
         Ok(())
+    })
+}
+
+/// Publish the framework's queue and confirmed outcomes without inferring them
+/// from counter changes. The legacy watch contract remains unchanged.
+pub fn publish_desktop(
+    iface: &zbus::blocking::object_server::InterfaceRef<ControlSurface>,
+    state: String,
+) -> zbus::Result<()> {
+    let mut surface = iface.get_mut();
+    let job = surface.jobs.snapshot();
+    if surface.last_job != job {
+        surface.last_job = job.clone();
+        zbus::block_on(ControlSurface::job_changed(iface.signal_emitter(), &job))?;
+    }
+    if surface.desktop_state == state {
+        return Ok(());
+    }
+    surface.desktop_state = state.clone();
+    zbus::block_on(async {
+        surface
+            .desktop_state_changed(iface.signal_emitter())
+            .await?;
+        ControlSurface::desktop_changed(iface.signal_emitter(), &state).await
     })
 }
 

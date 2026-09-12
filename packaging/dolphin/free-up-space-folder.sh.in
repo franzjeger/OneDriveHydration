@@ -76,20 +76,51 @@ freed=0
 ok=0
 skipped=0
 problems=''
+cancelled=0
+prog_ref=''
+qdbus_bin=$(command -v qdbus6 || command -v qdbus || true)
+
+progress_done() {
+    [ -n "$prog_ref" ] || return 0
+    $qdbus_bin $prog_ref close >/dev/null 2>&1 || true
+    prog_ref=''
+}
+trap 'progress_done' EXIT
+
+problem() {
+    problems="${problems}${1}
+    ${2}
+"
+}
+
+record_reply() {
+    case "$reply" in
+        "kept: AlreadyDehydrated") skipped=$((skipped + 1)) ;;
+        "reclaimed "*" bytes")
+            n=${reply#reclaimed }; n=${n% bytes}
+            case "$n" in
+                '' | *[!0-9]*) problem "$1" "Invalid response: $reply"; return ;;
+            esac
+            if [ "$n" -eq 0 ]; then skipped=$((skipped + 1))
+            else freed=$((freed + n)); ok=$((ok + 1)); fi
+            ;;
+        *) problem "$1" "$reply" ;;
+    esac
+}
 
 for f in "$@"; do
     abs=$(readlink -f -- "$f" 2>/dev/null) || abs=$f
 
     case "$abs" in
         "$MOUNT")
-            problems="${problems}${abs}\n    that is the sync folder itself\n"
+            problem "$abs" 'that is the sync folder itself'
             continue
             ;;
         "$MOUNT"/*)
             rel=${abs#"$MOUNT"/}
             ;;
         *)
-            problems="${problems}${abs}\n    not inside the sync folder\n"
+            problem "$abs" "not inside the sync folder ($MOUNT)"
             continue
             ;;
     esac
@@ -97,18 +128,7 @@ for f in "$@"; do
     # If it's not a directory, fall through to single-file evict.
     if [ ! -d "$abs" ]; then
         reply=$("$CTL" evict "$rel" 2>&1) || true
-        case "$reply" in
-            "reclaimed "*" bytes")
-                n=${reply#reclaimed }
-                n=${n% bytes}
-                case "$n" in '' | *[!0-9]*) n=0 ;; esac
-                freed=$((freed + n))
-                ok=$((ok + 1))
-                ;;
-            *)
-                skipped=$((skipped + 1))
-                ;;
-        esac
+        record_reply "$abs"
         refresh_overlay "$abs"
         continue
     fi
@@ -120,54 +140,58 @@ for f in "$@"; do
     # refusal we ignore — then the per-file evicts below succeed. Without this the
     # wrapper would count every file as "skipped" and free nothing, the "Free Up
     # Space did nothing" the user saw on a kept folder.
-    "$CTL" unpin "$rel" >/dev/null 2>&1 || true
+    reply=$("$CTL" unpin "$rel" 2>&1) || true
+    if [ "$reply" != unpinned ]; then
+        problem "$abs" "Could not release the folder's Keep on Device setting: $reply"
+        continue
+    fi
 
     # Directory: enumerate all regular files and evict each one.
     # We only evict files that are NOT already dehydrated (no point evicting
     # a placeholder), and we skip the framework's own internal files.
-    total=0
+    listing=$(find "$abs" -type f ! -name '.hydration-*' ! -name '.onedrive-*' 2>&1)
+    if [ "$?" -ne 0 ]; then
+        problem "$abs" "Could not list all files: $listing"
+        continue
+    fi
+    total=$(printf '%s\n' "$listing" | sed '/^$/d' | wc -l)
+    done_n=0
+    if [ "$total" -gt 0 ] && [ -n "$qdbus_bin" ] && command -v kdialog >/dev/null 2>&1; then
+        prog_ref=$(kdialog --title "$TITLE" --progressbar "Freeing space in $(basename -- "$abs")…" "$total" 2>/dev/null) || prog_ref=''
+        [ -z "$prog_ref" ] || $qdbus_bin $prog_ref showCancelButton true >/dev/null 2>&1 || true
+    fi
     while IFS= read -r child; do
         [ -n "$child" ] || continue
-        total=$((total + 1))
+        if [ -n "$prog_ref" ] && [ "$($qdbus_bin $prog_ref wasCancelled 2>/dev/null)" = true ]; then
+            cancelled=1
+            break
+        fi
         childrel="${child#"$MOUNT"/}"
         reply=$("$CTL" evict "$childrel" 2>&1) || true
-        case "$reply" in
-            "reclaimed "*" bytes")
-                n=${reply#reclaimed }
-                n=${n% bytes}
-                case "$n" in '' | *[!0-9]*) n=0 ;; esac
-                freed=$((freed + n))
-                ok=$((ok + 1))
-                ;;
-            "kept:"*)
-                skipped=$((skipped + 1))
-                ;;
-            *)
-                skipped=$((skipped + 1))
-                ;;
-        esac
+        record_reply "$child"
+        done_n=$((done_n + 1))
+        if [ -n "$prog_ref" ]; then
+            $qdbus_bin $prog_ref Set "" value "$done_n" >/dev/null 2>&1 || true
+            $qdbus_bin $prog_ref setLabelText "Processed $done_n of $total — $(basename -- "$child")" >/dev/null 2>&1 || true
+        fi
         refresh_overlay "$child"
     done <<EOF
-$(find "$abs" -type f \
-    ! -name '.hydration-*' \
-    ! -name '.onedrive-*' \
-    2>/dev/null)
+$listing
 EOF
-
+    progress_done
     # Refresh the directory itself so its overlay badge updates.
     refresh_overlay "$abs"
+    [ "$cancelled" -eq 0 ] || break
 done
 
-if [ "$ok" -gt 0 ]; then
-    msg="Freed $(human "$freed") from $ok $(files_word "$ok")."
-    if [ "$skipped" -gt 0 ]; then
-        msg="$msg $skipped $(files_word "$skipped") already cloud-only or kept."
-    fi
-    say ok "$msg"
-else
-    if [ "$skipped" -gt 0 ]; then
-        say ok "Nothing to free — $skipped $(files_word "$skipped") were already cloud-only or kept on device."
-    else
-        say problem "Nothing was freed."
-    fi
+msg="Freed $(human "$freed") from $ok $(files_word "$ok")."
+[ "$skipped" -eq 0 ] || msg="$msg $skipped $(files_word "$skipped") had no local space to reclaim."
+[ "$cancelled" -eq 0 ] || msg="Cancelled. $msg Remaining files were left as they are."
+if [ -n "$problems" ]; then
+    say problem "$msg
+
+These items could not be freed:
+$problems"
+    exit 1
 fi
+say ok "$msg"

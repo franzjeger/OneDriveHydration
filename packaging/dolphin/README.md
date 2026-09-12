@@ -1,6 +1,6 @@
 # The Dolphin actions
 
-Two inverse context-menu actions on the selected files: **Free Up Space**
+Two inverse context-menu actions on selected files and folders: **Free Up Space**
 evicts them back to placeholders, and **Keep on Device** pins them so eviction
 skips them and pulls their content down now. Shipped as data — one KIO
 servicemenu `.desktop` and a POSIX shell wrapper per action — for the same
@@ -8,9 +8,9 @@ reason the tray is a StatusNotifierItem and the flyout is QML: the file manager
 already knows how to draw a menu, and a toolkit would buy nothing. Zero new Rust
 dependencies; `cargo deny check` sees an unchanged graph.
 
-Free Up Space is file-only; Keep on Device reaches files *and* folders, but
-through two separate menu entries so that only Keep on Device appears on a folder
-— the daemon offers no bulk evict, so Free Up Space never should. Keep on Device
+Separate file and folder menu entries expose both actions. The folder Free Up
+Space wrapper enumerates files and calls the daemon's `evict` operation for
+each one, preserving its per-file checks. Keep on Device
 works on a file by `pin`-ning it and asking `onedrive-hydrationctl hydrate` to
 read it down, and on a folder by pinning it once (the pin protects the subtree)
 and pulling its dehydrated files down one at a time via the daemon's `pending`
@@ -31,13 +31,14 @@ wrong — if the sync root does not exist or `onedrive-hydrationctl` is not
 executable where it was told. A missing CLI would otherwise produce a menu
 entry that fails only when clicked.
 
-It writes two files under `$XDG_DATA_HOME` (default `~/.local/share`):
+It writes these files under `$XDG_DATA_HOME` (default `~/.local/share`):
 
 | | |
 |---|---|
 | `kio/servicemenus/onedrive-hydration.desktop` | the file entry (both actions) |
-| `kio/servicemenus/onedrive-hydration-folder.desktop` | the folder entry (Keep on Device only) |
+| `kio/servicemenus/onedrive-hydration-folder.desktop` | the folder entry (both actions) |
 | `onedrive-hydration/free-up-space.sh` | the Free Up Space wrapper |
+| `onedrive-hydration/free-up-space-folder.sh` | the folder Free Up Space wrapper |
 | `onedrive-hydration/keep-on-device.sh` | the Keep on Device wrapper |
 
 ## Measured on this KIO build, not taken from documentation
@@ -46,8 +47,7 @@ With `probes/servicemenu-match.cpp`, which builds the real `KFileItemActions`
 menu and prints it. Full detail in `docs/DOLPHIN-GROUNDWORK.md`.
 
 * `MimeType=all/allfiles;` reaches a regular file of any mimetype, and does
-  **not** reach a directory — which is what the file entry wants, because
-  Free Up Space takes a file and there is no bulk-evict to offer on a folder.
+  **not** reach a directory; folder actions have their own entry.
 * `MimeType=inode/directory;` (the folder entry, measured on KIO 6.28) reaches a
   directory and **not** a regular file, so the folder entry never doubles the
   file entry's Keep on Device. It survives a multi-directory selection.
@@ -86,24 +86,35 @@ way the flyout quotes `Error.Kept` rather than flattening it.
 
 ## The status overlay emblems (`overlay/`)
 
-The third surface: a per-file badge in Dolphin — a cloud for a cloud-only
-placeholder, a check for an on-device file — so the file manager shows at a
-glance what the tray shows in aggregate. Unlike the actions above, this cannot be
-data: KDE draws third-party overlays through `KOverlayIconPlugin`, a compiled KF6
-plugin (not `KVersionControlPlugin`, which needs a sentinel file at the sync root
-and lets only one plugin own a tree). So `overlay/` is the first place this
-product needs a Qt6/KF6 toolchain to build. `docs/DOWNLOAD-VISIBILITY-GROUNDWORK.md`
-is the design and the measured gates behind it.
+The compiled KF6 `KOverlayIconPlugin` draws these badges inside the configured
+OneDrive roots:
 
-The whole answer for one file is a single `lgetxattr` of the framework's
-`user.hydration.dehydrated` mark — metadata, never content. Measured on a real
-mount under a live mark (`HydrationAPI`'s `probes/xattrread.c`, on btrfs, ext4,
-and xfs): that read fires no pre-content event, so drawing the badge cannot
-hydrate the placeholder it draws it for, and Dolphin only asks about the files it
-is showing, never the whole tree. A resident file carries no mark, so the plugin
-is scoped to the sync roots it is told about
-(`$XDG_CONFIG_HOME/onedrive-hydration/overlay-roots`); outside them it badges
-nothing.
+| Badge | File | Folder |
+|---|---|---|
+| Cloud (`cloud-download`) | Online-only placeholder | Contains observed online-only files |
+| Green check (`emblem-success`) | Local content matches its last confirmed content stamp | All inspected content matches, and the entire bounded scan completed |
+| Arrows (`view-refresh`) | Local content differs from its last confirmed stamp | Contains an observed local content change |
+| Question mark (`emblem-question`) | No reliable content status available | Unknown entries or scan limit reached without a more specific observed state |
+
+The green check uses `user.hydration.stamp`, cloud identity, and the current
+size/mtime. Residency alone never earns a check. The stamp records content
+confirmed by hydration or upload; it does **not** establish that renames,
+deletions, remote changes, or conflicts have all settled. Arrows indicate a local
+content change, not proof that a transfer is currently active. New or ignored
+files without a stamp remain unknown.
+
+The plugin reads only metadata (`lstat` and `lgetxattr`) and directory entries,
+never file content, so querying a placeholder does not download it. Folder
+inspection stops at 128 entries or four directory levels; a partial scan never
+earns a green check. An observed local change takes precedence over an observed
+cloud-only file. A cloud badge describes observed availability and does not
+certify the rest of a large folder.
+
+Roots are listed in `$XDG_CONFIG_HOME/onedrive-hydration/overlay-roots`.
+Outside them the plugin adds no badges. Metadata watches on up to 512 recently
+requested items refresh badges after uploads even when size and mtime stay the
+same. Servicemenu actions also announce changes through `KDirNotify`; child
+changes refresh parent badges up to the configured root.
 
 Install it separately from the servicemenu, because the `.so` must land in the
 *system* Qt plugin dir — measured: a `~/.local/lib/qt6/plugins` plugin is not
@@ -117,23 +128,30 @@ That builds the plugin (needs cmake, Qt6, and KF6 dev packages), installs it
 system-wide (sudo), writes the roots config, and removes the donor client's
 overlay plugin — which reads `user.onedrive.syncstate` and, now that this product
 ships an overlay of its own, would draw a second, wrong badge on every file. This
-first cut returns Breeze's built-in `vcs-normal` / `vcs-update-required` emblems,
-which ship with every KF6 desktop, so it draws with no icon-install step; branded
-`onedrive-cloud` / `onedrive-synced` emblems are a later slice.
+plugin uses Breeze's built-in icons listed above. Restart Dolphin after
+installation to load the plugin.
 
-## What is deliberately not here
+The CMake/CTest suite loads the real plugin against scratch files and checks
+content states, folder limits, root scoping, parent refresh, and xattr-only
+upload completion. It does not modify a live OneDrive account:
 
-**Free Up Space on a folder.** Free Up Space stays file-only on purpose —
-recursing in shell would invent a bulk evict the daemon does not offer, with none
-of its judgment about what is safe. That is why the folder entry
-(`servicemenu-folder.desktop.in`, `MimeType=inode/directory;`) carries *only* Keep
-on Device: Free Up Space is deliberately absent from a directory's menu. Keep on
-Device's folder recursion is safe by contrast — the daemon's `pending` verb lists
-the dehydrated files with its own judgment (confinement, skipping the framework's
-own names), and the wrapper hydrates each; see `HydrationAPI`'s
-`docs/KEEP-ON-DEVICE-GROUNDWORK.md` §3.
+```
+cmake -S overlay -B /tmp/onedrive-overlay-tests
+cmake --build /tmp/onedrive-overlay-tests
+ctest --test-dir /tmp/onedrive-overlay-tests --output-on-failure
+```
 
-The donor client's `onedrive-overlay.so` used to be listed here as untouched,
-because this product shipped no overlay to collide with it. That is no longer
-true — the overlay above ships now — so its removal moved into
-`overlay/install-overlay.sh`, which owns the collision.
+## Integrated installation and jobs
+
+Prefer `../install-desktop.sh` for a Plasma desktop. It installs a dynamic
+`KAbstractFileItemActionPlugin` under `kf6/kfileitemaction`; its OneDrive submenu
+is scoped to configured roots and accepts mixed file/folder selections. These
+actions start jobs through the owner-checked D-Bus service. The panel shows job
+progress, errors, and cancellation after the current file. Static servicemenus
+and shell wrappers remain a standalone fallback. Their folder action now reports
+actual failures and uses kdialog for progress/cancellation when available.
+
+A clean file or folder protected by its own or an ancestor's pin uses
+`onedrive-hydration-pinned`, a filled green circle. Pin changes refresh badges for
+recently requested descendants. Unknown and cloud-only states keep their own
+badges until content is known to be resident and clean.

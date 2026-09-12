@@ -1,5 +1,7 @@
+pub mod account;
 pub mod auth_state;
 pub mod dbus;
+pub mod jobs;
 pub mod pkce;
 pub mod tray;
 

@@ -15,7 +15,7 @@
 use onedrive_hydration_daemon::auth_state::CredentialState;
 use onedrive_hydration_daemon::dbus::{DaemonState, BUS_NAME, INTERFACE, OBJECT_PATH};
 use onedrive_hydration_daemon::tray::{
-    present, ICON_APP, ICON_EXPOSED, ICON_STOPPED, ICON_SYNCED, ICON_UNSENT,
+    present, ICON_APP, ICON_EXPOSED, ICON_STOPPED, ICON_SYNCED, ICON_SYNCING, ICON_UNSENT,
 };
 use std::path::{Path, PathBuf};
 
@@ -120,14 +120,14 @@ fn the_flyout_dials_the_surface_this_crate_serves() {
         "the flyout must subscribe to ActiveUploadsChanged, not poll"
     );
     assert!(qml.contains("properties.Uploading"));
-    // The upload progress bar and the peak it measures against.
+    // Activity has no byte totals: render an indeterminate indicator.
     assert!(
         read("contents/ui/FullRepresentation.qml").contains("PlasmaComponents3.ProgressBar"),
         "the flyout must show an upload progress bar"
     );
     assert!(
-        qml.contains("unsentPeak"),
-        "the bar needs a batch high-water denominator"
+        read("contents/ui/FullRepresentation.qml").contains("indeterminate: true"),
+        "activity without byte totals must not imply a percentage"
     );
     // The per-file list is not just subscribed to: the flyout page must render
     // it, or the property would be dead state.
@@ -145,14 +145,29 @@ fn the_flyout_dials_the_surface_this_crate_serves() {
     assert!(read("contents/ui/FullRepresentation.qml").contains("Sign in"));
     // The named errors the flyout branches on.
     assert!(qml.contains(".Error.Kept"));
-    for icon in [ICON_SYNCED, ICON_UNSENT, ICON_EXPOSED, ICON_STOPPED] {
-        assert!(qml.contains(icon), "the QML must use the theme icon {icon}");
+    for icon in [
+        ICON_SYNCED,
+        ICON_UNSENT,
+        ICON_SYNCING,
+        ICON_EXPOSED,
+        ICON_STOPPED,
+    ] {
+        let icons = package_root()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("icons/hicolor/scalable/status");
+        assert!(
+            icons.join(format!("{icon}.svg")).is_file(),
+            "missing icon {icon}"
+        );
     }
 }
 
 #[test]
 fn the_flyout_wording_cannot_drift_from_the_tray() {
-    let qml = read("contents/ui/main.qml");
+    let qml = read("contents/ui/Presentation.js");
 
     // Wherever present() produces a static sentence, require it verbatim.
     let service_absent = shown(None);
@@ -207,14 +222,13 @@ fn the_flyout_wording_cannot_drift_from_the_tray() {
     // count; pin the fragments that carry the meaning. Each is a contiguous
     // literal in both tray.rs and the QML.
     for fragment in [
-        " mounts bypass hydration",
         " still waiting to upload.",
         " to upload",
         " not reached OneDrive yet.",
         "local change has",
         "local changes have",
-        " 1 file is a cloud-only placeholder.",
-        " files are cloud-only placeholders.",
+        " 1 file is available online only.",
+        " files are available online only.",
         "Before it stopped, ",
         "exposed the sync folder.",
         "other mount",

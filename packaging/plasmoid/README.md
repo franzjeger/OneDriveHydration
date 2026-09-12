@@ -39,7 +39,7 @@ Only that active, five-minute interaction polls `EnrollmentStatus`; normal sync
 state remains entirely signal-driven. The refresh token is stored directly in
 Linux Secret Service before the browser receives a success page.
 
-The wording of every state is copied from `tray.rs` verbatim, and
+The wording and precedence in `contents/ui/Presentation.js` mirror `tray.rs`, and
 `crates/onedrive-daemon/tests/plasmoid_package.rs` pins the two against each
 other (deriving the expected strings from `present()` where they are static),
 along with the bus names and icon names. Those tests are drift alarms, not
@@ -71,7 +71,7 @@ a live bus — see below.
 
 On Plasma, this plasmoid *is* the tray presence: same icons, same states,
 same precedence (service absent, daemon stopped, exposures — rendered
-`NeedsAttention` — sign-in required — also `NeedsAttention` — unsent,
+`NeedsAttention` — sign-in required — also `NeedsAttention` — unresolved engine issues — pause — active work, queued changes,
 synced), plus the flyout. Running `onedrive-hydration-tray` at the same time
 shows a second, independent icon; the SNI binary remains the presence for
 desktops without plasmashell.
@@ -102,21 +102,51 @@ runs as the user inside the session, so it asks `systemctl --user` about
 reports and never acts: installing an applet is not authority to stop
 somebody's service.
 
-## What the D-Bus surface cannot answer yet
+## Desktop state and remaining limits
 
-Built deliberately against what exists rather than inventing data:
+The versioned `DesktopState` JSON exposes the connected mount, account owner/quota,
+local disk space, actual pending uploads with errors/retry delay, confirmed upload
+history, and unresolved engine issues. It is observational; HydrationAPI owns the work.
+`DesktopChanged` and `AvailabilityJobChanged` keep the panel current. Pause gates new
+background passes, expires after two hours and resets on restart; on-demand reads still
+work. Retry preserves all conditional-write checks. Availability progress counts processed
+files and local bytes made available/reclaimed, with cancellation after the current file.
 
-* The mount path is not on the bus, so the flyout is told through plasmoid
-  configuration (defaulting to `~/OneDrive`) the way the tray is told
-  through `--mount`.
-* Placeholder and unsent figures are file counts; there are no byte totals,
-  so "how much disk would hydrating cost" cannot be shown.
-* No account identity, quota, byte totals, recent activity, or conflict list.
-  Per-file upload names and whole-object download activity are available, but
-  the framework exposes no byte-level transfer progress.
-* Credential health and user-initiated browser re-enrollment are now on the
-  surface. The generated D-Bus unit carries the public client id; no credential
-  or authorization code crosses the D-Bus interface.
+Network byte progress, transfer speed, a complete namespace/download history, initial
+storage setup and competing-version resolution remain outside this surface. Account
+metadata refreshes every five minutes. Credentials and authorization codes never appear
+in these properties. Unresolved availability issues deliberately have no local-open action:
+reading such a file can replace ambiguous bytes with a cloud download.
 
-Widening the surface is its own task with its own measurements; this flyout
-shows everything the surface can currently say and nothing it cannot.
+## Activity center and verification
+
+The main view uses a concise status, an indeterminate indicator only during observed
+activity, active upload rows with an action to open the containing folder, and a bounded
+activity list. Pending changes never become a made-up transfer percentage. Counts and
+mount details are behind "Sync details"; long text and lists scroll while the header and
+folder action stay fixed. The compact tray button supports Space, Enter and accessibility
+press actions. Filenames and errors are rendered as plain text.
+
+Recent activity merges the daemon's bounded persistent upload outcomes with the latest
+20 session events (upload starts, sign-in and user availability actions). A cold snapshot
+is not replayed as a new event, and a file leaving the active list does not imply success.
+Only a confirmed engine outcome becomes an upload-completed entry. Opening a containing
+folder may cause Dolphin previews to read files; settings explain the preview preference.
+
+The Qt Quick tests execute the real presentation and view with synthetic state; they do
+not contact an account or alter a sync mount. Run on a Plasma 6 development machine:
+
+```sh
+QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software \
+  /usr/lib/qt6/bin/qmltestrunner -input packaging/plasmoid/tests
+```
+
+Fedora uses `/usr/lib64/qt6/bin/qmltestrunner`. The `flyout` CI job runs these tests with a
+private session bus. Coverage includes active/queued/stopped precedence, genuine busy
+indicators, long content in a small popup, keyboard activation, safe folder URLs, and
+history that never invents upload success. Rust tests cover the SNI surface independently.
+
+The flyout includes measured payload transfer progress, per-device folder exclusions,
+and reviewed file-conflict choices. See the main README for scope and recovery
+requirements. Conflict confirmation is a separate action after selecting a version;
+incomplete local placeholder bytes can never be uploaded as a complete document.

@@ -76,6 +76,7 @@ action=$action_dir/free-up-space.sh
 action2=$action_dir/keep-on-device.sh
 action3=$action_dir/free-up-space-folder.sh
 mkdir -p "$action_dir" "$menu_dir"
+install -m 755 "$here/selection-action.sh" "$action_dir/selection-action.sh"
 
 for src_dst in "free-up-space.sh.in=$action" "keep-on-device.sh.in=$action2" "free-up-space-folder.sh.in=$action3"; do
     src=${src_dst%%=*}

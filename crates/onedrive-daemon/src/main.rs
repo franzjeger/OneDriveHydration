@@ -228,6 +228,17 @@ fn main() -> io::Result<()> {
                 ));
             }
             let profile = discover_drive(&mut GraphHttp::new(Arc::clone(&cache)))?;
+            {
+                let cache = Arc::clone(&cache);
+                let mount = mount.clone();
+                let profile_path = args.socket.with_extension("profile.json");
+                // A previous daemon/account's runtime snapshot must not be
+                // presented as a fresh answer while this request is in flight.
+                let _ = std::fs::remove_file(&profile_path);
+                std::thread::spawn(move || {
+                    onedrive_hydration_daemon::account::serve(cache, mount, profile_path)
+                });
+            }
             eprintln!(
                 "onedrive-hydration-daemon: drive={} type={}",
                 profile.id.as_str(),
@@ -303,7 +314,7 @@ fn main() -> io::Result<()> {
                 }
             });
 
-            daemon_loop::run(
+            daemon_loop::run_with_history(
                 Config {
                     mount,
                     socket: args.socket,
@@ -323,6 +334,7 @@ fn main() -> io::Result<()> {
                         .then(hydration_client::evict_policy::EvictionConfig::default_pressure),
                 },
                 access,
+                Some(args.state_dir.join("desktop-history.json")),
             )
         }
     }

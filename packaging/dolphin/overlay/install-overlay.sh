@@ -76,7 +76,7 @@ if [ -z "$build_dir" ]; then
     build_dir=$(mktemp -d "${TMPDIR:-/tmp}/onedrive-overlay-build.XXXXXX")
     cleanup_build=$build_dir
 fi
-trap '[ -n "$cleanup_build" ] && rm -rf "$cleanup_build"' EXIT
+trap 'if [ -n "$cleanup_build" ]; then rm -rf "$cleanup_build"; fi' EXIT
 
 printf 'building the overlay plugin...\n'
 # Configure and build. Capture output so a failure shows what actually happened
@@ -111,6 +111,8 @@ printf 'built: %s\n' "$so"
 # silently never appear — the plugin loads nowhere and nothing says so. So ask
 # Qt where its plugins live and install into its kf6/overlayicon namespace.
 plugin_dir=$(qtpaths6 --plugin-dir 2>/dev/null \
+    || /usr/lib/qt6/bin/qtpaths --plugin-dir 2>/dev/null \
+    || /usr/lib64/qt6/bin/qtpaths --plugin-dir 2>/dev/null \
     || qmake6 -query QT_INSTALL_PLUGINS 2>/dev/null \
     || printf '/usr/lib/qt6/plugins')
 dest="$plugin_dir/kf6/overlayicon/onedrive-hydration-overlay.so"
@@ -129,6 +131,9 @@ if ! $sudo install -D -m 755 "$so" "$dest"; then
     printf 'refused: could not install the plugin to %s\n' "$dest" >&2
     exit 1
 fi
+actions=$(find "$build_dir" -name 'onedrive-hydration-actions.so' -print | head -n 1)
+[ -n "$actions" ] || { printf 'refused: context-menu plugin was not built.\n' >&2; exit 1; }
+$sudo install -D -m 755 "$actions" "$plugin_dir/kf6/kfileitemaction/onedrive-hydration-actions.so"
 
 # The roots config: user scope, one absolute path per line, read by the plugin
 # at startup. Without it a resident file — which carries no mark — is

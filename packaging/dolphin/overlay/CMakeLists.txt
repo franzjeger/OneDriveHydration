@@ -41,3 +41,19 @@ kcoreaddons_add_plugin(onedrive-hydration-overlay
     SOURCES hydrationoverlay.cpp
     INSTALL_NAMESPACE "kf6/overlayicon")
 target_link_libraries(onedrive-hydration-overlay KF6::KIOCore Qt6::DBus)
+
+kcoreaddons_add_plugin(onedrive-hydration-actions
+    SOURCES hydrationactions.cpp
+    INSTALL_NAMESPACE "kf6/kfileitemaction")
+target_link_libraries(onedrive-hydration-actions KF6::KIOWidgets Qt6::DBus)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(overlay-status-test tests/overlay-status-test.cpp)
+    target_link_libraries(overlay-status-test KF6::KIOCore Qt6::DBus)
+    add_test(NAME overlay-status COMMAND overlay-status-test $<TARGET_FILE:onedrive-hydration-overlay>)
+    add_executable(actions-test tests/actions-test.cpp)
+    target_link_libraries(actions-test KF6::KIOWidgets)
+    add_test(NAME actions COMMAND actions-test $<TARGET_FILE:onedrive-hydration-actions>)
+    set_tests_properties(actions PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()

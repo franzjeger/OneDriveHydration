@@ -6,8 +6,9 @@ copy the tree verbatim:
 
 | Icon name | Tray state |
 |---|---|
-| `onedrive-hydration-synced` | daemon running, nothing unsent, no exposures |
-| `onedrive-hydration-unsent` | local changes not yet uploaded |
+| `onedrive-hydration-synced` | running and idle, no queued changes or attention state |
+| `onedrive-hydration-unsent` | local changes waiting to upload |
+| `onedrive-hydration-syncing` | active uploads, downloads, or cloud checks |
 | `onedrive-hydration-exposed` | another mount exposes the sync files (the warning state) |
 | `onedrive-hydration-stopped` | daemon or state service not running |
 | `onedrive-hydration` | the application icon, used in the tooltip |
@@ -21,9 +22,11 @@ theme; until this has run, Plasma falls back to resolving the item's `Id`
 
 ## Provenance and attribution
 
-All five are ported from
+The original five are ported from
 [OneDriveForLinux](https://github.com/franzjeger/OneDriveForLinux), the
 donor client this repository's README names for product features.
+
+The additional `syncing` icon uses the same cloud and badge with two transfer arrows.
 
 The donor kept its four SVG assets and its tray art as *different things*,
 and the port preserves that distinction rather than mapping four files onto
@@ -52,3 +55,5 @@ The donor repository declares no license of its own. Both repositories have
 the same author, and these ported and derived files are distributed under
 this repository's MIT OR Apache-2.0 terms with that authority; this notice
 is the attribution the port is required to retain.
+
+`onedrive-hydration-pinned.svg` is an original geometric circle/check drawing, under this repository’s MIT OR Apache-2.0 license. It marks content protected by Keep on Device.

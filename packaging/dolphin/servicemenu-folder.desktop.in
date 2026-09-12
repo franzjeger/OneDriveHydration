@@ -1,8 +1,7 @@
 [Desktop Entry]
 Type=Service
-# The folder half of Keep on Device, kept a *separate* entry from the file one so
-# that only Keep on Device reaches a directory — Free Up Space stays file-only,
-# because the daemon offers no bulk evict.
+# Folder actions have a separate entry from file actions. Free Up Space uses
+# the daemon's per-file evict operation; Keep on Device pins and hydrates the tree.
 #
 # Measured on this KIO build with probes/servicemenu-match.cpp (plasmashell
 # 6.7.4, KIO 6.28), not taken from documentation. Against a control that returned

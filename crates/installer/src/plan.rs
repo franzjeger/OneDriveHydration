@@ -840,6 +840,9 @@ pub fn install(
              flyout); a session bus that predates this install may need one \
              log-out/log-in to notice the new activation file\n\
              {tray_next}\n\
+             recommended for Plasma: as {u}, run {assets}/install-desktop.sh --mount {m}; \
+             it installs and checks the panel, icons, Dolphin menus and overlays together. \
+             Use --check on the same command to diagnose an existing desktop setup.\n\
              for Dolphin's \"Free Up Space\" and \"Keep on Device\" actions, as {u}: \
              {assets}/dolphin/install-servicemenu.sh --mount {m}\n\
              for cloud/on-device badges (compiled KF6 plugin): \

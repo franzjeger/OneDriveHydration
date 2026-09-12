@@ -258,7 +258,7 @@ fn registers_reflects_every_state_and_serves_the_menu() {
     );
     assert_eq!(
         item.get_property::<ToolTip>("ToolTip").unwrap().title,
-        "Sync daemon not running"
+        "Sync is stopped"
     );
 
     // From here on, everything arrives by signal.
@@ -274,7 +274,7 @@ fn registers_reflects_every_state_and_serves_the_menu() {
     assert_eq!(item.get_property::<String>("Status").unwrap(), "Active");
     let tip = item.get_property::<ToolTip>("ToolTip").unwrap();
     assert_eq!(tip.title, "Up to date");
-    assert!(tip.text.contains("7 files are cloud-only placeholders"));
+    assert_eq!(tip.text, "All local changes are saved in OneDrive.");
 
     service.publish(true, 3, 7, 0);
     new_icons.next().unwrap();
@@ -284,7 +284,7 @@ fn registers_reflects_every_state_and_serves_the_menu() {
     );
     assert_eq!(
         item.get_property::<ToolTip>("ToolTip").unwrap().title,
-        "3 changes to upload"
+        "3 changes waiting to upload"
     );
 
     // Exposures outrank the unsent work and demand attention.
@@ -304,7 +304,7 @@ fn registers_reflects_every_state_and_serves_the_menu() {
         "NeedsAttention"
     );
     let tip = item.get_property::<ToolTip>("ToolTip").unwrap();
-    assert_eq!(tip.title, "2 mounts bypass hydration");
+    assert_eq!(tip.title, "Check your OneDrive folder");
     assert!(tip.text.contains("3 changes are still waiting to upload"));
 
     // The menu: full shape from the root, the way the measured host asks.
@@ -321,19 +321,22 @@ fn registers_reflects_every_state_and_serves_the_menu() {
     );
     assert_eq!(
         label(&decoded[0].1).as_deref(),
-        Some("2 mounts bypass hydration"),
+        Some("Check your OneDrive folder"),
         "the status entry mirrors the current headline"
     );
     assert_eq!(
         label(&decoded[1].1).as_deref(),
-        Some("Cloud-only placeholders: 7 files"),
+        Some("Online-only: 7 files"),
         "the standing counter is visible while the daemon runs"
     );
     assert_eq!(
         label(&decoded[7].1).as_deref(),
         Some("Open OneDrive Folder")
     );
-    assert_eq!(label(&decoded[9].1).as_deref(), Some("Quit"));
+    assert_eq!(
+        label(&decoded[9].1).as_deref(),
+        Some("Hide tray icon (sync continues)")
+    );
 
     // A folder click opens exactly the configured mount.
     menu.call::<_, _, ()>("Event", &(3i32, "clicked", Value::from(0i32), 0u32))
@@ -369,7 +372,7 @@ fn registers_reflects_every_state_and_serves_the_menu() {
         menu_updates.next().unwrap();
     }
     assert_eq!(rows[&6].as_deref(), Some("Downloading 1 file"));
-    assert_eq!(rows[&7].as_deref(), Some("Indexing…"));
+    assert_eq!(rows[&7].as_deref(), Some("Checking for changes…"));
     assert_eq!(rows[&8].as_deref(), Some("Uploading Documents/report.docx"));
 
     quit(&observer, tray);
@@ -426,7 +429,7 @@ fn losing_the_state_service_is_shown_as_its_own_honest_state() {
     );
     assert_eq!(
         item.get_property::<ToolTip>("ToolTip").unwrap().title,
-        "State service not running"
+        "Sync status unavailable"
     );
 
     // It returns with a running daemon and the tray recovers, signal-driven.

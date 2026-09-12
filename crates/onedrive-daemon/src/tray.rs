@@ -26,9 +26,8 @@
 //! * A watcher present but with no host registered displays nothing. That is
 //!   warned about once at startup; the watcher announces hosts when they
 //!   arrive and our registration stays valid, so there is nothing to redo.
-//! * The state service vanishing from the bus is shown as its own state
-//!   ("state service not running") distinct from "daemon not running" —
-//!   collapsing the two would hide which process needs starting.
+//! * An unavailable state service and a stopped sync process remain distinct
+//!   states, with concise messages explaining what is known.
 //!
 //! Eviction is deliberately absent from the menu. `Evict` needs a path, a
 //! path needs a file picker, and a file picker needs a GUI toolkit this
@@ -77,6 +76,8 @@ pub const MENU_PATH: &str = "/MenuBar";
 pub const ICON_SYNCED: &str = "onedrive-hydration-synced";
 /// See [`ICON_SYNCED`].
 pub const ICON_UNSENT: &str = "onedrive-hydration-unsent";
+/// Transfers or a cloud scan are in progress.
+pub const ICON_SYNCING: &str = "onedrive-hydration-syncing";
 /// See [`ICON_SYNCED`].
 pub const ICON_EXPOSED: &str = "onedrive-hydration-exposed";
 /// See [`ICON_SYNCED`].
@@ -98,7 +99,7 @@ pub struct Presentation {
     pub headline: String,
     /// A sentence or two of tooltip body.
     pub detail: String,
-    /// The menu's "Cloud-only placeholders: …" row — the flyout's counter of
+    /// The menu's "Online-only: …" row — the flyout's counter of
     /// the same name, shown (count and all, zero included) whenever the
     /// daemon runs. The one row that is not activity: it is what the mount
     /// *is*, so an idle menu still says something true instead of nothing.
@@ -133,8 +134,8 @@ fn count(n: u64, singular: &str, plural: &str) -> String {
 fn placeholders_line(excluded: u64) -> String {
     match excluded {
         0 => String::new(),
-        1 => " 1 file is a cloud-only placeholder.".to_owned(),
-        n => format!(" {n} files are cloud-only placeholders."),
+        1 => " 1 file is available online only.".to_owned(),
+        n => format!(" {n} files are available online only."),
     }
 }
 
@@ -145,9 +146,7 @@ fn placeholders_line(excluded: u64) -> String {
 fn store_caveat(credential: CredentialState) -> &'static str {
     match credential {
         CredentialState::Unsaved => {
-            " Warning: the sign-in works but its rotation could not be saved to Linux Secret \
-             Service — unlock the keyring, or the next daemon start may require signing in \
-             again."
+            " Unlock your keyring to keep OneDrive signed in after restarting."
         }
         _ => "",
     }
@@ -178,23 +177,19 @@ fn store_caveat(credential: CredentialState) -> &'static str {
 ///    credential (measured semantics: `MAX_REJECTIONS` consecutive
 ///    `invalid_grant`s, nothing less). Only the *running* daemon asserts
 ///    this, so showing it never contradicts rule 2.
-/// 5. Unsent changes — ordinary work in flight.
-/// 6. Synced.
+/// 5. Active transfers and cloud checks, even when the queue is empty.
+/// 6. Changes waiting to upload, with no inferred transfer progress.
+/// 7. Up to date.
 ///
-/// Wording rule for the stopped states: the files are *unreachable*, not
-/// lost, and the text says so explicitly rather than leaving a scary blank.
-/// The signed-out state follows the same rule — a signed-out client has
-/// lost nothing either — and names `onedrive-hydration-daemon reauth`, whose
-/// browser flow works when Conditional Access blocks device code. The
-/// toolkit-free tray has no browser-launch button; the Plasma flyout does.
+/// Stopped and rejected states explain file availability without exposing
+/// internal process names. The existing sign-in action starts browser enrollment.
 pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Presentation {
     let Some(state) = state else {
         return Presentation {
             icon: ICON_STOPPED,
             sni_status: "Active",
-            headline: "State service not running".to_owned(),
-            detail: "onedrive-hydration-dbus is not on the session bus, so the daemon's state \
-                     is unknown. Files stay in OneDrive either way; nothing is lost."
+            headline: "Sync status unavailable".to_owned(),
+            detail: "Waiting to reconnect to OneDrive. Your synced files are safe in OneDrive."
                 .to_owned(),
             placeholders_row: None,
             downloading_row: None,
@@ -204,8 +199,7 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
         };
     };
     if !state.daemon_running {
-        let mut detail = "Cloud-only files cannot be opened until the daemon starts. Nothing is \
-                          lost: every synced file is still in OneDrive."
+        let mut detail = "Online-only files will be available when sync starts. Your synced files are safe in OneDrive."
             .to_owned();
         if state.exposures > 0 {
             // Held, last-seen knowledge — quoted as such, not shown as live.
@@ -217,7 +211,7 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
         return Presentation {
             icon: ICON_STOPPED,
             sni_status: "Active",
-            headline: "Sync daemon not running".to_owned(),
+            headline: "Sync is stopped".to_owned(),
             detail,
             // Held activity is not shown at all: a "Downloading" row over a
             // dead process is the same wrong message as a held sign-in state.
@@ -232,7 +226,7 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
     // included — the flyout keeps this counter on screen whenever the daemon
     // runs, and it is what stops an idle menu from saying nothing at all.
     let placeholders_row = Some(format!(
-        "Cloud-only placeholders: {}",
+        "Online-only: {}",
         count(state.excluded, "file", "files")
     ));
     // The activity rows, shown while the daemon runs regardless of which
@@ -251,22 +245,8 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
     };
     let offer_sign_in = credential == CredentialState::Rejected;
     if state.exposures > 0 {
-        let headline = if state.exposures == 1 {
-            "1 mount bypasses hydration".to_owned()
-        } else {
-            format!("{} mounts bypass hydration", state.exposures)
-        };
-        let mut detail = if state.exposures == 1 {
-            "Another mount exposes the OneDrive files, and reads through it bypass hydration: \
-             they can silently return empty placeholder content. Unmount the extra path to \
-             close the bypass."
-                .to_owned()
-        } else {
-            "Other mounts expose the OneDrive files, and reads through them bypass hydration: \
-             they can silently return empty placeholder content. Unmount the extra paths to \
-             close the bypass."
-                .to_owned()
-        };
+        let headline = "Check your OneDrive folder".to_owned();
+        let mut detail = "Files opened through an extra mount may be empty. Unmount the extra location before opening files there.".to_owned();
         if state.unsent > 0 {
             detail.push_str(&format!(
                 " {} still waiting to upload.",
@@ -287,14 +267,7 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
         };
     }
     if credential == CredentialState::Rejected {
-        let mut detail = "OneDrive no longer accepts this machine's saved sign-in — it was \
-                          revoked, expired, or invalidated by a password change or policy. \
-                          Nothing is lost: every synced file is still in OneDrive, but nothing \
-                          syncs and cloud-only files cannot be opened until you sign in again. \
-                          Use the flyout's Sign in button, or run \
-                          onedrive-hydration-daemon reauth from a terminal; browser PKCE works \
-                          when Conditional Access blocks device code, and the daemon restarts \
-                          onto the new sign-in."
+        let mut detail = "Sign in again to sync changes and open online-only files. Your synced files are safe in OneDrive."
             .to_owned();
         if state.unsent > 0 {
             detail.push_str(&format!(
@@ -314,11 +287,53 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
             offer_sign_in,
         };
     }
+    // Activity is authoritative even if the queue counter is zero. It must
+    // never share the idle icon or claim that all work is finished.
+    if state.downloading > 0 || state.indexing || !state.uploading.is_empty() {
+        let (headline, detail) = if state.downloading > 0 && !state.uploading.is_empty() {
+            (
+                "Syncing files".to_owned(),
+                "Uploading and downloading your files.",
+            )
+        } else if !state.uploading.is_empty() {
+            (
+                format!(
+                    "Uploading {}",
+                    count(state.uploading.len() as u64, "file", "files")
+                ),
+                "Saving your changes to OneDrive.",
+            )
+        } else if state.downloading > 0 {
+            (
+                format!("Downloading {}", count(state.downloading, "file", "files")),
+                "Making your files available on this device.",
+            )
+        } else {
+            (
+                "Checking for changes".to_owned(),
+                "Looking for updates in OneDrive.",
+            )
+        };
+        return Presentation {
+            icon: ICON_SYNCING,
+            sni_status: "Active",
+            headline,
+            detail: format!("{detail}{}", store_caveat(credential)),
+            placeholders_row,
+            downloading_row,
+            indexing_row,
+            uploading_row,
+            offer_sign_in,
+        };
+    }
     if state.unsent > 0 {
         return Presentation {
             icon: ICON_UNSENT,
             sni_status: "Active",
-            headline: format!("{} to upload", count(state.unsent, "change", "changes")),
+            headline: format!(
+                "{} waiting to upload",
+                count(state.unsent, "change", "changes")
+            ),
             detail: format!(
                 "{} not reached OneDrive yet.{}{}",
                 count(state.unsent, "local change has", "local changes have"),
@@ -337,8 +352,7 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
         sni_status: "Active",
         headline: "Up to date".to_owned(),
         detail: format!(
-            "All local changes are in OneDrive.{}{}",
-            placeholders_line(state.excluded),
+            "All local changes are saved in OneDrive.{}",
             store_caveat(credential)
         ),
         placeholders_row,
@@ -347,6 +361,88 @@ pub fn present(state: Option<DaemonState>, credential: CredentialState) -> Prese
         uploading_row,
         offer_sign_in,
     }
+}
+
+fn present_with_desktop(
+    state: Option<DaemonState>,
+    credential: CredentialState,
+    desktop: DesktopStatus,
+) -> Presentation {
+    let mut result = present(state.clone(), credential);
+    if result.headline == "Up to date" && desktop.excluded_folders > 0 {
+        result.detail = format!(
+            "Selected folders are up to date. {} folder(s) are not synced on this device.",
+            desktop.excluded_folders
+        );
+    }
+    if (desktop.paused || desktop.issues > 0 || desktop.resolving)
+        && state
+            .as_ref()
+            .is_some_and(|s| s.daemon_running && s.exposures == 0)
+        && credential != CredentialState::Rejected
+    {
+        if desktop.resolving {
+            result.icon = ICON_SYNCING;
+            result.sni_status = "Active";
+            result.headline = "Resolving file conflict".into();
+            result.detail =
+                "Recovery copies are retained. Open the OneDrive panel for progress.".into();
+            return result;
+        }
+        let active = state
+            .as_ref()
+            .is_some_and(|s| s.downloading > 0 || s.indexing || !s.uploading.is_empty());
+        if desktop.issues > 0 {
+            result.icon = ICON_UNSENT;
+            result.sni_status = "NeedsAttention";
+            result.headline = "Needs attention".into();
+            result.detail = format!(
+                "{} file(s) need review. Open the OneDrive panel for details.",
+                desktop.issues
+            );
+            return result;
+        }
+        result.icon = ICON_STOPPED;
+        result.headline = if active {
+            "Pausing after current work"
+        } else {
+            "Sync paused"
+        }
+        .into();
+        result.detail = "Background sync is paused. Files you open can still download.".into();
+    }
+    result
+}
+
+#[derive(Clone, Copy, Default)]
+struct DesktopStatus {
+    paused: bool,
+    issues: usize,
+    excluded_folders: usize,
+    resolving: bool,
+}
+impl DesktopStatus {
+    fn parse(text: &str) -> Self {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+            return Self::default();
+        };
+        if v["available"] != true {
+            return Self::default();
+        }
+        Self {
+            paused: v["paused"].as_bool().unwrap_or(false),
+            issues: v["issues"].as_array().map_or(0, Vec::len),
+            excluded_folders: v["selection"].as_array().map_or(0, Vec::len),
+            resolving: v["resolution"]["running"] == true,
+        }
+    }
+}
+fn read_desktop(connection: &zbus::blocking::Connection) -> DesktopStatus {
+    zbus::blocking::Proxy::new(connection, BUS_NAME, OBJECT_PATH, INTERFACE)
+        .ok()
+        .and_then(|p| p.get_property::<String>("DesktopState").ok())
+        .map(|s| DesktopStatus::parse(&s))
+        .unwrap_or_default()
 }
 
 /// What a left click (and the menu's folder entry) does. The mount path is
@@ -571,6 +667,7 @@ const MENU_PLACEHOLDERS: i32 = 10;
 
 /// Events the interfaces push at the run loop.
 enum TrayEvent {
+    Desktop(DesktopStatus),
     /// A `StateChanged` signal arrived from the state service.
     State(DaemonState),
     /// A `CredentialStateChanged` signal arrived from the state service.
@@ -589,7 +686,7 @@ enum TrayEvent {
     ServiceReturned,
     /// A new watcher owns [`WATCHER_NAME`]; register with it.
     WatcherReturned,
-    /// The menu's Quit entry was clicked.
+    /// Hide the tray icon; synchronization is owned by a separate process.
     Quit,
     /// A signal stream ended, which only happens when our own bus connection
     /// died. There is nothing left to serve.
@@ -644,7 +741,7 @@ fn menu_item_properties(
         MENU_PLACEHOLDERS => Some(statement_row(presentation.placeholders_row.as_deref())),
         MENU_DOWNLOADING => Some(statement_row(presentation.downloading_row.as_deref())),
         MENU_INDEXING => Some(statement_row(
-            presentation.indexing_row.then_some("Indexing…"),
+            presentation.indexing_row.then_some("Checking for changes…"),
         )),
         MENU_UPLOADS => Some(statement_row(presentation.uploading_row.as_deref())),
         MENU_SEPARATOR_A => Some(vec![("type", Value::from("separator"))]),
@@ -662,7 +759,7 @@ fn menu_item_properties(
         ]),
         MENU_SEPARATOR_B if has_mount => Some(vec![("type", Value::from("separator"))]),
         MENU_QUIT => Some(vec![
-            ("label", Value::from("Quit")),
+            ("label", Value::from("Hide tray icon (sync continues)")),
             ("icon-name", Value::from("application-exit")),
         ]),
         _ => None,
@@ -1120,6 +1217,20 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
     let uploads_signals = state_proxy
         .receive_signal("ActiveUploadsChanged")
         .map_err(io::Error::other)?;
+    let desktop_signals = state_proxy
+        .receive_signal("DesktopChanged")
+        .map_err(io::Error::other)?;
+    let pause_events = events.clone();
+    thread::spawn(move || {
+        for message in desktop_signals {
+            if let Ok((text,)) = message.body().deserialize::<(String,)>() {
+                let desktop = DesktopStatus::parse(&text);
+                if pause_events.send(TrayEvent::Desktop(desktop)).is_err() {
+                    break;
+                }
+            }
+        }
+    });
     let service_owner_changes = fdo
         .receive_name_owner_changed_with_args(&[(0, BUS_NAME)])
         .map_err(io::Error::other)?;
@@ -1175,7 +1286,10 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
     thread::spawn(move || {
         for message in download_signals {
             if let Ok((downloading,)) = message.body().deserialize::<(u64,)>() {
-                if download_events.send(TrayEvent::Download(downloading)).is_err() {
+                if download_events
+                    .send(TrayEvent::Download(downloading))
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -1243,9 +1357,14 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
     // arrive on two signals and go stale together only when the service
     // itself goes away.
     let mut daemon_state = read_service_state(&connection);
+    let mut desktop = read_desktop(&connection);
     let mut credential = read_credential_state(&connection);
-    apply_presentation(&sni, &menu, &present(daemon_state.clone(), credential))
-        .map_err(io::Error::other)?;
+    apply_presentation(
+        &sni,
+        &menu,
+        &present_with_desktop(daemon_state.clone(), credential, desktop),
+    )
+    .map_err(io::Error::other)?;
 
     // Register only now, with the objects served and current: a watcher that
     // looks the moment we register must find the real item, not a half-built
@@ -1266,6 +1385,15 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
 
     loop {
         match event_queue.recv() {
+            Ok(TrayEvent::Desktop(value)) => {
+                desktop = value;
+                apply_presentation(
+                    &sni,
+                    &menu,
+                    &present_with_desktop(daemon_state.clone(), credential, desktop),
+                )
+                .map_err(io::Error::other)?;
+            }
             Ok(TrayEvent::State(mut state)) => {
                 // StateChanged carries only the four counters; the activity
                 // trio ride their own signals. A state update must therefore
@@ -1279,30 +1407,46 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
                     state.uploading = previous.uploading.clone();
                 }
                 daemon_state = Some(state);
-                apply_presentation(&sni, &menu, &present(daemon_state.clone(), credential))
-                    .map_err(io::Error::other)?;
+                apply_presentation(
+                    &sni,
+                    &menu,
+                    &present_with_desktop(daemon_state.clone(), credential, desktop),
+                )
+                .map_err(io::Error::other)?;
             }
             Ok(TrayEvent::Download(downloading)) => {
                 // Without a known state there is nothing to attach the count
                 // to; the cold read after the service returns will carry it.
                 if let Some(state) = &mut daemon_state {
                     state.downloading = downloading;
-                    apply_presentation(&sni, &menu, &present(daemon_state.clone(), credential))
-                        .map_err(io::Error::other)?;
+                    apply_presentation(
+                        &sni,
+                        &menu,
+                        &present_with_desktop(daemon_state.clone(), credential, desktop),
+                    )
+                    .map_err(io::Error::other)?;
                 }
             }
             Ok(TrayEvent::Indexing(indexing)) => {
                 if let Some(state) = &mut daemon_state {
                     state.indexing = indexing;
-                    apply_presentation(&sni, &menu, &present(daemon_state.clone(), credential))
-                        .map_err(io::Error::other)?;
+                    apply_presentation(
+                        &sni,
+                        &menu,
+                        &present_with_desktop(daemon_state.clone(), credential, desktop),
+                    )
+                    .map_err(io::Error::other)?;
                 }
             }
             Ok(TrayEvent::Uploads(uploading)) => {
                 if let Some(state) = &mut daemon_state {
                     state.uploading = uploading;
-                    apply_presentation(&sni, &menu, &present(daemon_state.clone(), credential))
-                        .map_err(io::Error::other)?;
+                    apply_presentation(
+                        &sni,
+                        &menu,
+                        &present_with_desktop(daemon_state.clone(), credential, desktop),
+                    )
+                    .map_err(io::Error::other)?;
                 }
             }
             Ok(TrayEvent::SignIn) => {
@@ -1317,28 +1461,39 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
                     // EnrollmentBusy and EnrollmentUnavailable both land
                     // here, quoted; a click that did nothing must leave a
                     // trace, and stderr reaches the journal.
-                    Err(e) => eprintln!(
-                        "onedrive-hydration-tray: sign-in could not start: {e}"
-                    ),
+                    Err(e) => eprintln!("onedrive-hydration-tray: sign-in could not start: {e}"),
                 });
             }
             Ok(TrayEvent::Credential(state)) => {
                 credential = state;
-                apply_presentation(&sni, &menu, &present(daemon_state.clone(), credential))
-                    .map_err(io::Error::other)?;
+                apply_presentation(
+                    &sni,
+                    &menu,
+                    &present_with_desktop(daemon_state.clone(), credential, desktop),
+                )
+                .map_err(io::Error::other)?;
             }
             Ok(TrayEvent::ServiceGone) => {
                 // Nothing the service asserted survives it leaving the bus.
                 daemon_state = None;
                 credential = CredentialState::Unknown;
-                apply_presentation(&sni, &menu, &present(daemon_state.clone(), credential))
-                    .map_err(io::Error::other)?;
+                apply_presentation(
+                    &sni,
+                    &menu,
+                    &present_with_desktop(daemon_state.clone(), credential, desktop),
+                )
+                .map_err(io::Error::other)?;
             }
             Ok(TrayEvent::ServiceReturned) => {
+                desktop = read_desktop(&connection);
                 daemon_state = read_service_state(&connection);
                 credential = read_credential_state(&connection);
-                apply_presentation(&sni, &menu, &present(daemon_state.clone(), credential))
-                    .map_err(io::Error::other)?;
+                apply_presentation(
+                    &sni,
+                    &menu,
+                    &present_with_desktop(daemon_state.clone(), credential, desktop),
+                )
+                .map_err(io::Error::other)?;
             }
             Ok(TrayEvent::WatcherReturned) => {
                 // A restarted watcher (kded6) lost every registration it
@@ -1385,21 +1540,51 @@ mod tests {
     }
 
     #[test]
+    fn desktop_attention_and_pause_override_idle_but_not_sign_in() {
+        let desktop =
+            DesktopStatus::parse(r#"{"available":true,"paused":true,"issues":[{"path":"a.txt"}]}"#);
+        let p = present_with_desktop(
+            Some(state(true, 0, 0, 0)),
+            CredentialState::Healthy,
+            desktop,
+        );
+        assert_eq!(p.headline, "Needs attention");
+        assert_eq!(p.sni_status, "NeedsAttention");
+        let p = present_with_desktop(
+            Some(state(true, 0, 0, 0)),
+            CredentialState::Rejected,
+            desktop,
+        );
+        assert_eq!(p.headline, "Sign-in required");
+        let p = present_with_desktop(
+            Some(state(true, 0, 0, 0)),
+            CredentialState::Healthy,
+            DesktopStatus {
+                paused: true,
+                issues: 0,
+                excluded_folders: 0,
+                resolving: false,
+            },
+        );
+        assert_eq!(p.headline, "Sync paused");
+    }
+
+    #[test]
     fn a_missing_service_and_a_stopped_daemon_are_different_states() {
         let service_gone = shown(None);
         let daemon_stopped = shown(Some(state(false, 0, 0, 0)));
         assert_eq!(service_gone.icon, ICON_STOPPED);
         assert_eq!(daemon_stopped.icon, ICON_STOPPED);
         assert_ne!(service_gone.headline, daemon_stopped.headline);
-        assert!(service_gone.detail.contains("onedrive-hydration-dbus"));
-        assert!(daemon_stopped.detail.contains("daemon"));
+        assert!(service_gone.detail.contains("reconnect"));
+        assert!(daemon_stopped.detail.contains("when sync starts"));
     }
 
     #[test]
     fn stopped_states_say_files_are_unreachable_not_lost() {
         for p in [shown(None), shown(Some(state(false, 3, 10, 0)))] {
             assert!(
-                p.detail.contains("nothing is lost") || p.detail.contains("Nothing is lost"),
+                p.detail.contains("Your synced files are safe in OneDrive"),
                 "stopped detail must say nothing is lost: {:?}",
                 p.detail
             );
@@ -1423,13 +1608,13 @@ mod tests {
         let p = shown(Some(state(true, 5, 100, 1)));
         assert_eq!(p.icon, ICON_EXPOSED);
         assert_eq!(p.sni_status, "NeedsAttention");
-        assert_eq!(p.headline, "1 mount bypasses hydration");
-        assert!(p.detail.contains("bypass hydration"));
+        assert_eq!(p.headline, "Check your OneDrive folder");
+        assert!(p.detail.contains("may be empty"));
         // The unsent work is still reported, just not as the headline.
         assert!(p.detail.contains("5 changes are still waiting to upload"));
 
         let plural = shown(Some(state(true, 0, 0, 3)));
-        assert_eq!(plural.headline, "3 mounts bypass hydration");
+        assert_eq!(plural.headline, "Check your OneDrive folder");
         assert!(!plural.detail.contains("waiting to upload"));
     }
 
@@ -1456,58 +1641,79 @@ mod tests {
     fn unsent_counts_read_naturally_in_both_numbers() {
         let one = shown(Some(state(true, 1, 0, 0)));
         assert_eq!(one.icon, ICON_UNSENT);
-        assert_eq!(one.headline, "1 change to upload");
+        assert_eq!(one.headline, "1 change waiting to upload");
         assert!(one.detail.contains("1 local change has not reached"));
 
         let many = shown(Some(state(true, 12, 1, 0)));
-        assert_eq!(many.headline, "12 changes to upload");
+        assert_eq!(many.headline, "12 changes waiting to upload");
         assert!(many.detail.contains("12 local changes have not reached"));
-        assert!(many.detail.contains("1 file is a cloud-only placeholder."));
+        assert!(many.detail.contains("1 file is available online only."));
     }
 
     #[test]
-    fn synced_reports_up_to_date_and_the_placeholder_population() {
+    fn idle_keeps_storage_counts_out_of_the_headline_and_detail() {
         let p = shown(Some(state(true, 0, 146820, 0)));
         assert_eq!(p.icon, ICON_SYNCED);
         assert_eq!(p.headline, "Up to date");
-        assert!(p
-            .detail
-            .contains("146820 files are cloud-only placeholders."));
-        // A drive with nothing dehydrated gets no placeholder line.
-        assert!(!shown(Some(state(true, 0, 0, 0)))
-            .detail
-            .contains("placeholder"));
+        assert_eq!(p.detail, "All local changes are saved in OneDrive.");
+        assert_eq!(
+            p.placeholders_row.as_deref(),
+            Some("Online-only: 146820 files")
+        );
     }
 
     #[test]
-    fn sign_in_required_says_nothing_is_lost_and_names_the_tool_that_works() {
+    fn sign_in_required_explains_the_action_and_preserves_pending_work() {
         let p = present(Some(state(true, 0, 7, 0)), CredentialState::Rejected);
         assert_eq!(p.headline, "Sign-in required");
-        assert_eq!(p.icon, ICON_STOPPED);
         assert_eq!(p.sni_status, "NeedsAttention");
-        // The register the stopped states established: unreachable, not lost.
-        assert!(p.detail.contains("Nothing is lost"), "{}", p.detail);
-        // The instruction must be one that works on this deployment —
-        // Conditional Access blocks the daemon's device-code flow, so the
-        // native browser enrollment command is named, and the wording says why.
-        assert!(
-            p.detail.contains("onedrive-hydration-daemon reauth"),
-            "{}",
-            p.detail
-        );
-        assert!(p.detail.contains("Conditional Access"), "{}", p.detail);
-        // And what happens next, because the daemon really does restart
-        // onto the directly stored enrollment.
-        assert!(p.detail.contains("restarts onto"), "{}", p.detail);
-
-        // Unsent work is still reported, the way the exposure arm does it.
+        assert!(p.offer_sign_in);
+        assert!(p.detail.contains("Sign in again"));
+        assert!(p.detail.contains("Your synced files are safe in OneDrive"));
+        assert!(p.detail.len() < 160);
         let busy = present(Some(state(true, 4, 0, 0)), CredentialState::Rejected);
-        assert!(
-            busy.detail
-                .contains("4 changes are still waiting to upload"),
-            "{}",
-            busy.detail
-        );
+        assert!(busy
+            .detail
+            .contains("4 changes are still waiting to upload"));
+    }
+
+    #[test]
+    fn active_work_never_claims_to_be_up_to_date_even_with_an_empty_queue() {
+        for (downloading, indexing, uploads, expected) in [
+            (1, false, vec![], "Downloading 1 file"),
+            (2, true, vec![], "Downloading 2 files"),
+            (0, true, vec![], "Checking for changes"),
+            (0, false, vec!["report.docx".to_owned()], "Uploading 1 file"),
+            (1, true, vec!["report.docx".to_owned()], "Syncing files"),
+        ] {
+            let active = DaemonState {
+                downloading,
+                indexing,
+                uploading: uploads,
+                ..state(true, 0, 0, 0)
+            };
+            let p = shown(Some(active.clone()));
+            assert_eq!(p.headline, expected);
+            assert_eq!(p.icon, ICON_SYNCING);
+            assert!(!p.detail.contains("All local changes"));
+            let waiting = shown(Some(DaemonState {
+                unsent: 17,
+                ..active.clone()
+            }));
+            assert_eq!(waiting.headline, expected);
+            let stopped = shown(Some(DaemonState {
+                daemon_running: false,
+                ..active.clone()
+            }));
+            assert_eq!(stopped.headline, "Sync is stopped");
+            let rejected = present(Some(active.clone()), CredentialState::Rejected);
+            assert_eq!(rejected.headline, "Sign-in required");
+            let exposed = shown(Some(DaemonState {
+                exposures: 1,
+                ..active
+            }));
+            assert_eq!(exposed.headline, "Check your OneDrive folder");
+        }
     }
 
     #[test]
@@ -1516,7 +1722,7 @@ mod tests {
         // loudly. The one a person must see first is the quiet one.
         let p = present(Some(state(true, 0, 0, 1)), CredentialState::Rejected);
         assert_eq!(p.icon, ICON_EXPOSED);
-        assert_eq!(p.headline, "1 mount bypasses hydration");
+        assert_eq!(p.headline, "Check your OneDrive folder");
     }
 
     #[test]
@@ -1527,10 +1733,10 @@ mod tests {
         // and a re-enroll instruction over a locked keyring is the exact
         // wrong message this surface exists to avoid.
         let p = present(Some(state(false, 0, 0, 0)), CredentialState::Rejected);
-        assert_eq!(p.headline, "Sync daemon not running");
+        assert_eq!(p.headline, "Sync is stopped");
         assert!(!p.detail.contains("pkce-enroll"), "{}", p.detail);
         let gone = present(None, CredentialState::Rejected);
-        assert_eq!(gone.headline, "State service not running");
+        assert_eq!(gone.headline, "Sync status unavailable");
     }
 
     #[test]
@@ -1547,14 +1753,12 @@ mod tests {
                 "the headline stays about the work"
             );
             assert!(
-                unsaved
-                    .detail
-                    .contains("could not be saved to Linux Secret Service"),
+                unsaved.detail.contains("Unlock your keyring"),
                 "{}",
                 unsaved.detail
             );
             assert!(
-                unsaved.detail.contains("unlock the keyring"),
+                unsaved.detail.contains("after restarting"),
                 "{}",
                 unsaved.detail
             );
@@ -1735,14 +1939,16 @@ mod tests {
         // The flyout keeps this counter on screen, zero included; the menu
         // does the same, so an idle menu still says something true.
         assert_eq!(
-            shown(Some(state(true, 0, 0, 0))).placeholders_row.as_deref(),
-            Some("Cloud-only placeholders: 0 files")
+            shown(Some(state(true, 0, 0, 0)))
+                .placeholders_row
+                .as_deref(),
+            Some("Online-only: 0 files")
         );
         assert_eq!(
             shown(Some(state(true, 0, 146820, 0)))
                 .placeholders_row
                 .as_deref(),
-            Some("Cloud-only placeholders: 146820 files")
+            Some("Online-only: 146820 files")
         );
         // Never over a stopped daemon or an absent service: a held counter
         // is the same wrong message as held activity.
@@ -1777,8 +1983,11 @@ mod tests {
             exposures: 1,
             ..activity(1, false, &["a.txt"])
         }));
-        assert_eq!(exposed.headline, "1 mount bypasses hydration");
-        assert_eq!(exposed.downloading_row.as_deref(), Some("Downloading 1 file"));
+        assert_eq!(exposed.headline, "Check your OneDrive folder");
+        assert_eq!(
+            exposed.downloading_row.as_deref(),
+            Some("Downloading 1 file")
+        );
 
         // Never on a stopped daemon or an absent service: held activity is
         // the same wrong message as a held sign-in state.
@@ -1804,7 +2013,7 @@ mod tests {
         let busy = menu_showing(shown(Some(activity(1, true, &["a.txt"]))), None);
         for (id, label) in [
             (MENU_DOWNLOADING, "Downloading 1 file"),
-            (MENU_INDEXING, "Indexing…"),
+            (MENU_INDEXING, "Checking for changes…"),
             (MENU_UPLOADS, "Uploading a.txt"),
         ] {
             let props = busy.item_properties(id).unwrap();

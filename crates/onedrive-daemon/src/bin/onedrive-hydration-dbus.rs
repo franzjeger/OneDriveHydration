@@ -4,8 +4,8 @@
 
 use onedrive_hydration_daemon::auth_state;
 use onedrive_hydration_daemon::dbus::{
-    publish_credential, publish_state, watch_credential, watch_daemon, ControlSurface, BUS_NAME,
-    OBJECT_PATH,
+    publish_credential, publish_desktop, publish_state, watch_credential, watch_daemon,
+    ControlSurface, BUS_NAME, OBJECT_PATH,
 };
 use onedrive_hydration_daemon::runtime_socket;
 use std::io;
@@ -66,6 +66,32 @@ fn main() -> io::Result<()> {
         .object_server()
         .interface::<_, ControlSurface>(OBJECT_PATH)
         .map_err(io::Error::other)?;
+    {
+        let desktop_iface = connection
+            .object_server()
+            .interface::<_, ControlSurface>(OBJECT_PATH)
+            .map_err(io::Error::other)?;
+        let desktop_socket = socket.clone();
+        std::thread::spawn(move || loop {
+            let mut state = onedrive_hydration_daemon::control_request(&desktop_socket, "desktop")
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .filter(|v| v.get("version").and_then(|v| v.as_u64()) == Some(1))
+                .unwrap_or_else(|| serde_json::json!({"available": false}));
+            if state.get("version").is_some() {
+                state["available"] = true.into();
+                if let Ok(bytes) = std::fs::read(desktop_socket.with_extension("profile.json")) {
+                    if let Ok(profile) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                        state["account"] = profile;
+                    }
+                }
+            }
+            if let Err(e) = publish_desktop(&desktop_iface, state.to_string()) {
+                eprintln!("onedrive-hydration-dbus: could not publish desktop state: {e}");
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        });
+    }
     // The daemon's second socket, derived the way the daemon derives it: the
     // sign-in conclusion lives at `.auth` next to the control socket's
     // `.ctl`. Watched on its own thread with its own backoff, because the
