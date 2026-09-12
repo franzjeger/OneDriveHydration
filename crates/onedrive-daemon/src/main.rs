@@ -55,7 +55,7 @@ fn usage() -> ! {
         "usage:\n  onedrive-hydration-daemon auth|reauth --state-dir <path> --client-id <uuid> \
          [--browser|--device-code] [--no-browser] [--socket <path>]\n  \
          onedrive-hydration-daemon run --mount <path> --state-dir <path> --client-id <uuid> \
-         [--socket <path>] [--autoevict]"
+         [--socket <path>] [--autoevict] [--quota-gb <gb>]"
     );
     std::process::exit(2)
 }
@@ -107,7 +107,7 @@ fn validate_cli(args: &[String]) -> Result<(), String> {
             &["--browser", "--device-code", "--no-browser"],
         ),
         "run" => (
-            &["--mount", "--state-dir", "--client-id", "--socket"],
+            &["--mount", "--state-dir", "--client-id", "--socket", "--quota-gb"],
             &["--autoevict"],
         ),
         other => return Err(format!("unknown command: {other}")),
@@ -324,14 +324,22 @@ fn main() -> io::Result<()> {
                     // sync folder did not reach the cloud until long after its
                     // owner had concluded the client was broken.
                     debounce: hydration_client::upload::QUIET_PERIOD,
-                    // Off unless `--autoevict` is passed: auto-freeing local
-                    // space is opt-in. When on, the framework's default
-                    // disk-pressure policy — dehydrate the least-recently-
-                    // acquired unpinned files below a low-water mark, honoring
-                    // the pin. Off is off: with `None` the framework spawns no
-                    // eviction thread at all.
-                    eviction: flag("--autoevict")
-                        .then(hydration_client::evict_policy::EvictionConfig::default_pressure),
+                    // Off unless `--autoevict` or `--quota-gb` is passed: auto-freeing local
+                    // space is opt-in.
+                    eviction: {
+                        let quota = value("--quota-gb").and_then(|s| s.parse::<u64>().ok());
+                        if flag("--autoevict") || quota.is_some() {
+                            let mut cfg = hydration_client::evict_policy::EvictionConfig::default_pressure();
+                            if let Some(gb) = quota {
+                                let bytes = gb * 1024 * 1024 * 1024;
+                                cfg.quota_bytes = Some(bytes);
+                                cfg.quota_target_bytes = Some(bytes * 9 / 10);
+                            }
+                            Some(cfg)
+                        } else {
+                            None
+                        }
+                    },
                 },
                 access,
                 Some(args.state_dir.join("desktop-history.json")),
