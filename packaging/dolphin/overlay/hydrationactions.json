@@ -1,0 +1,10 @@
+{
+    "KPlugin": {
+        "Name": "OneDrive",
+        "Description": "OneDrive actions for files and folders inside the sync root",
+        "Icon": "onedrive-hydration",
+        "MimeTypes": ["application/octet-stream", "inode/directory"],
+        "License": "MIT OR Apache-2.0"
+    },
+    "MimeType": "application/octet-stream;inode/directory;"
+}

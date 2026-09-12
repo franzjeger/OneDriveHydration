@@ -583,6 +583,27 @@ impl ControlSurface {
         }
     }
 
+    async fn list_cloud_folders(
+        &self,
+        path: String,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> Result<Vec<String>, Error> {
+        self.caller_permitted(&header, connection).await?;
+        let socket = self.socket.clone();
+        let reply = blocking::unblock(move || {
+            let cmd = format!("list_cloud {}", path.trim());
+            crate::control_request(&socket, &cmd)
+        })
+        .await
+        .map_err(|e| Error::Failed(e.to_string()))?;
+        if reply.starts_with("error:") {
+            Err(Error::Failed(reply))
+        } else {
+            serde_json::from_str(&reply).map_err(|e| Error::Failed(e.to_string()))
+        }
+    }
+
     async fn start_availability_job(
         &self,
         operation: String,
@@ -614,6 +635,23 @@ impl ControlSurface {
     ) -> Result<(), Error> {
         self.caller_permitted(&header, connection).await?;
         self.jobs.cancel();
+        Ok(())
+    }
+
+    async fn open_setup_wizard(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> Result<(), Error> {
+        self.caller_permitted(&header, connection).await?;
+        std::thread::spawn(|| {
+            let _ = std::process::Command::new("onedrive-hydrationctl")
+                .arg("setup")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        });
         Ok(())
     }
 

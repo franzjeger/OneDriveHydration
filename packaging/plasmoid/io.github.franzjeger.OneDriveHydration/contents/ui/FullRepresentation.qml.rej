@@ -1,0 +1,11 @@
+--- packaging/plasmoid/io.github.franzjeger.OneDriveHydration/contents/ui/FullRepresentation.qml
++++ packaging/plasmoid/io.github.franzjeger.OneDriveHydration/contents/ui/FullRepresentation.qml
+@@ -90,7 +90,7 @@
+                     Layout.alignment: Qt.AlignHCenter
+                     Layout.topMargin: Kirigami.Units.largeSpacing
+                     text: "Sign In"
+-                    onClicked: full.host.beginEnrollment()
++                    onClicked: full.host.openSetupWizard()
+                 }
+                 PlasmaComponents3.Label {
+                     Layout.fillWidth: true

@@ -1,0 +1,30 @@
+--- crates/onedrive-daemon/src/dbus.rs
++++ crates/onedrive-daemon/src/dbus.rs
+@@ -583,6 +583,26 @@
+         }
+     }
+ 
++    async fn list_cloud_folders(
++        &self,
++        path: String,
++        #[zbus(header)] header: Header<'_>,
++        #[zbus(connection)] connection: &zbus::Connection,
++    ) -> Result<Vec<String>, Error> {
++        self.caller_permitted(&header, connection).await?;
++        let socket = self.socket.clone();
++        let reply = blocking::unblock(move || {
++            let cmd = format!("list_cloud {}", path.trim());
++            crate::control_request(&socket, &cmd)
++        })
++        .await
++        .map_err(|e| Error::Failed(e.to_string()))?;
++        if reply.starts_with("error:") {
++            Err(Error::Failed(reply))
++        } else {
++            serde_json::from_str(&reply).map_err(|e| Error::Failed(e.to_string()))
++        }
++    }
++
+     async fn start_availability_job(
+         &self,
+         operation: String,

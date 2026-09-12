@@ -1,0 +1,44 @@
+--- crates/onedrive-daemon/src/bin/onedrive-hydrationctl.rs
++++ crates/onedrive-daemon/src/bin/onedrive-hydrationctl.rs
+@@ -31,6 +31,7 @@
+ enum Action {
+     Forward(String),
+     Hydrate(String),
++    Setup,
+     Usage,
+ }
+ 
+@@ -43,6 +44,7 @@
+             Action::Forward(format!("{verb} {path}"))
+         }
+         [verb, path] if verb == "hydrate" && !path.is_empty() => Action::Hydrate(path.clone()),
++        [verb] if verb == "setup" => Action::Setup,
+         _ => Action::Usage,
+     }
+ }
+@@ -107,6 +109,7 @@
+         }
+     }
+ 
++    let mut setup_triggered = false;
+     let command = match parse(&positional) {
+         Action::Forward(c) => c,
+         Action::Hydrate(path) => {
+@@ -122,8 +125,18 @@
+                 }
+             };
+         }
++        Action::Setup => {
++            setup_triggered = true;
++            "status".to_owned() // Just to have a command for socket check
++        }
+         Action::Usage => usage(),
+     };
++
++    if setup_triggered {
++        let status = std::process::Command::new("qml6").arg("/usr/share/onedrive-hydration/ui/SetupWizard.qml").status()?;
++        std::process::exit(status.code().unwrap_or(1));
++    }
+ 
+     let socket = socket
+         .map(Ok)

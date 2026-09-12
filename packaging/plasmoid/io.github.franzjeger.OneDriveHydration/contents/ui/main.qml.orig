@@ -367,16 +367,6 @@ PlasmoidItem {
         Qt.openUrlExternally(root.mountUrl);
     }
 
-    function openSetupWizard() {
-        DBus.SessionBus.asyncCall({
-            service: root.busName,
-            path: root.objectPath,
-            iface: root.busName,
-            member: "OpenSetupWizard",
-            arguments: []
-        });
-    }
-
     function beginEnrollment() {
         if (root.enrollmentBusy) return;
         root.enrollmentPrepared = false;

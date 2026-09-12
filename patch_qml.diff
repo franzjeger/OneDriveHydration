@@ -1,0 +1,30 @@
+--- packaging/plasmoid/io.github.franzjeger.OneDriveHydration/contents/ui/main.qml
++++ packaging/plasmoid/io.github.franzjeger.OneDriveHydration/contents/ui/main.qml
+@@ -370,6 +370,16 @@
+         Qt.openUrlExternally(root.mountUrl);
+     }
+ 
++    function openSetupWizard() {
++        DBus.SessionBus.asyncCall({
++            service: root.busName,
++            path: root.objectPath,
++            iface: root.busName,
++            method: "OpenSetupWizard",
++            arguments: []
++        });
++    }
++
+     function beginEnrollment() {
+         if (root.enrollmentBusy) return;
+         root.enrollmentPrepared = false;
+--- packaging/plasmoid/io.github.franzjeger.OneDriveHydration/contents/ui/FullRepresentation.qml
++++ packaging/plasmoid/io.github.franzjeger.OneDriveHydration/contents/ui/FullRepresentation.qml
+@@ -90,7 +90,7 @@
+                     Layout.alignment: Qt.AlignHCenter
+                     Layout.topMargin: Kirigami.Units.largeSpacing
+                     text: "Sign In"
+-                    onClicked: full.host.beginEnrollment()
++                    onClicked: full.host.openSetupWizard()
+                 }
+                 PlasmaComponents3.Label {
+                     Layout.fillWidth: true

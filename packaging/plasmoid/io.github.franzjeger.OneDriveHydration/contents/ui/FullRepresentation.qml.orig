@@ -90,7 +90,7 @@ ColumnLayout {
                         enabled: !full.host.enrollmentBusy
                         text: full.host.enrollmentBusy ? "Waiting for browser…" : "Sign in"
                         icon.name: "system-log-in"
-                        onClicked: full.host.openSetupWizard()
+                        onClicked: full.host.beginEnrollment()
                     }
                 }
             }

@@ -31,6 +31,7 @@ fn usage() -> ! {
 enum Action {
     Forward(String),
     Hydrate(String),
+    Setup,
     Usage,
 }
 
@@ -46,6 +47,7 @@ fn parse(positional: &[String]) -> Action {
             Action::Forward(format!("{verb} {path}"))
         }
         [verb, path] if verb == "hydrate" && !path.is_empty() => Action::Hydrate(path.clone()),
+        [verb] if verb == "setup" => Action::Setup,
         _ => Action::Usage,
     }
 }
@@ -108,6 +110,7 @@ fn main() -> io::Result<()> {
         }
     }
 
+    let mut is_setup = false;
     let command = match parse(&positional) {
         Action::Forward(c) => c,
         Action::Hydrate(path) => {
@@ -123,8 +126,25 @@ fn main() -> io::Result<()> {
                 }
             };
         }
+        Action::Setup => {
+            is_setup = true;
+            "status".to_owned()
+        }
         Action::Usage => usage(),
     };
+
+    if is_setup {
+        // Fallback to source directory if not installed in /usr/share
+        let script = if std::path::Path::new("/usr/share/onedrive-hydration/ui/SetupWizard.qml").exists() {
+            "/usr/share/onedrive-hydration/ui/SetupWizard.qml".to_string()
+        } else {
+            // For dev
+            let exe = std::env::current_exe()?;
+            exe.parent().unwrap().join("../../../../packaging/plasmoid/io.github.franzjeger.OneDriveHydration/contents/ui/SetupWizard.qml").to_string_lossy().into_owned()
+        };
+        let status = std::process::Command::new("qml6").arg(&script).status()?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
 
     let socket = socket
         .map(Ok)

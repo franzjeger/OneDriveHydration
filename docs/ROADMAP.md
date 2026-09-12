@@ -25,7 +25,7 @@
 - [x] Resumable downloads with bounded retry and strict Content-Range validation
 - [x] Hard-fail QuickXorHash verification
 - [x] Download throttling and disconnect fault-injection tests
-- [ ] Process-restart fault-injection tests
+- [x] Process-restart fault-injection tests
 
 ## M2.5: complete sync semantics — release blocker
 
@@ -39,7 +39,7 @@
 - [x] Create and retain empty folders in both directions
 - [x] Move files between parents by destination folder ID
 - [x] Implement guarded local folder create, rename, move and delete
-- [ ] Pass the two-device conflict and process-restart matrix in
+- [x] Pass the two-device conflict and process-restart matrix in
       [the sync correctness gate](SYNC-ACCEPTANCE.md)
 - [ ] Pass the complete matrix against a dedicated non-production tenant
 
@@ -117,10 +117,10 @@ already in its `exclude folders`.
 - [x] Actual upload queue with errors, retry delay, containing-folder actions and retry controls
 - [x] Persistent unresolved sync issues, including ambiguous availability independent of queue counts
 - [x] Reviewed primary-drive file conflict choices with conditional writes and Btrfs recovery
-- [ ] Extend recovery beyond Btrfs and cover shared-library/deleted-remote conflicts
+- [x] Extend recovery beyond Btrfs and cover shared-library/deleted-remote conflicts
 - [x] Combined Plasma/Dolphin setup and component diagnostics
 - [x] Account/folder settings and a chooser for folders to keep offline
 - [x] Per-device folder exclusions, persistent policy, Dolphin badges and fresh listing on re-inclusion
-- [ ] Guided initial account/storage setup and a browser for cloud-only folder selection
+- [x] Guided initial account/storage setup and a browser for cloud-only folder selection
 
 The M4 UI work does not satisfy or replace M2.5's live correctness gate.
