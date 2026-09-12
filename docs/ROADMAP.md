@@ -45,8 +45,8 @@
 
 ## M3: Linux product shell
 
-The product-shell scope is feature-complete. M2.5's external correctness gate
-still blocks declaring the release production-ready.
+The original product-shell scope is implemented. M4 tracks the remaining desktop
+product work; M2.5's correctness gate still blocks production readiness.
 
 - [x] Owner-only local status and eviction CLI
 - [x] D-Bus control surface
@@ -97,3 +97,30 @@ already in its `exclude folders`.
       never silently mutate Dolphin's global preference. Other content readers
       (backup agents, antivirus, `updatedb`, a second indexer) remain out of the
       product's reach and belong in user-facing docs as the same class of hazard.
+
+## M4: desktop experience
+
+- [x] Distinguish active uploads, downloads, cloud checks and queued changes in both trays
+- [x] Indeterminate activity instead of queue-derived transfer percentages
+- [x] Concise status messages, fixed actions, scrolling content and expandable sync details
+- [x] Current upload rows with safe actions to open their containing folders
+- [x] Session activity for observed upload starts and confirmed sign-in/space-reclaim actions
+- [x] Keyboard and accessibility activation of the Plasma tray button
+- [x] Explain that hiding the SNI tray icon leaves synchronization running
+- [x] Execute QML state/layout regressions in CI
+- [x] Account identity, cloud quota and local free disk space from the daemon
+- [x] Confirmed upload completion/error events and bounded persistent history
+- [x] Complete history for namespace operations and downloads
+- [x] Pause/resume with current-pass completion and continued on-demand reads
+- [x] Availability jobs shared with Dolphin, with file-count progress, results and cancellation
+- [x] HTTP payload byte progress and measured transfer speed, including retries and partial downloads
+- [x] Actual upload queue with errors, retry delay, containing-folder actions and retry controls
+- [x] Persistent unresolved sync issues, including ambiguous availability independent of queue counts
+- [x] Reviewed primary-drive file conflict choices with conditional writes and Btrfs recovery
+- [ ] Extend recovery beyond Btrfs and cover shared-library/deleted-remote conflicts
+- [x] Combined Plasma/Dolphin setup and component diagnostics
+- [x] Account/folder settings and a chooser for folders to keep offline
+- [x] Per-device folder exclusions, persistent policy, Dolphin badges and fresh listing on re-inclusion
+- [ ] Guided initial account/storage setup and a browser for cloud-only folder selection
+
+The M4 UI work does not satisfy or replace M2.5's live correctness gate.
