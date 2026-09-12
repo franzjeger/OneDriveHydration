@@ -27,8 +27,8 @@ rows still require their corresponding live result before release.
 | Local file move to another folder | Yes | Required | Candidate |
 | Empty folder in either direction | Yes | Required | Candidate |
 | Local folder create/rename/move/delete | Yes | Required | Candidate |
-| Two-device edit, rename and delete conflicts | Partial | Required | Blocking |
-| Restart during fetch/upload/delta apply | Partial | Required | Blocking |
+| Two-device edit, rename and delete conflicts | Yes | Required | Candidate |
+| Restart during fetch/upload/delta apply | Yes | Required | Candidate |
 
 `Candidate` does not mean released. It means the operation has a fail-closed
 implementation and adversarial tests, and is ready for the live row. `Blocking`
