@@ -135,7 +135,9 @@ fn main() -> io::Result<()> {
 
     if is_setup {
         // Fallback to source directory if not installed in /usr/share
-        let script = if std::path::Path::new("/usr/share/onedrive-hydration/ui/SetupWizard.qml").exists() {
+        let script = if std::path::Path::new("/usr/share/onedrive-hydration/ui/SetupWizard.qml")
+            .exists()
+        {
             "/usr/share/onedrive-hydration/ui/SetupWizard.qml".to_string()
         } else {
             // For dev

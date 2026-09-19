@@ -107,7 +107,13 @@ fn validate_cli(args: &[String]) -> Result<(), String> {
             &["--browser", "--device-code", "--no-browser"],
         ),
         "run" => (
-            &["--mount", "--state-dir", "--client-id", "--socket", "--quota-gb"],
+            &[
+                "--mount",
+                "--state-dir",
+                "--client-id",
+                "--socket",
+                "--quota-gb",
+            ],
             &["--autoevict"],
         ),
         other => return Err(format!("unknown command: {other}")),
@@ -329,7 +335,8 @@ fn main() -> io::Result<()> {
                     eviction: {
                         let quota = value("--quota-gb").and_then(|s| s.parse::<u64>().ok());
                         if flag("--autoevict") || quota.is_some() {
-                            let mut cfg = hydration_client::evict_policy::EvictionConfig::default_pressure();
+                            let mut cfg =
+                                hydration_client::evict_policy::EvictionConfig::default_pressure();
                             if let Some(gb) = quota {
                                 let bytes = gb * 1024 * 1024 * 1024;
                                 cfg.quota_bytes = Some(bytes);
