@@ -15,6 +15,7 @@ list(APPEND CMAKE_MODULE_PATH ${ECM_MODULE_PATH})
 # settings a KF6 plugin expects. On some ECM versions KDECMakeSettings does not
 # set the library output directory kcoreaddons_add_plugin needs, so it is set
 # explicitly below (learned building the P2 gate plugin).
+set(QT_MAJOR_VERSION 6)
 include(KDEInstallDirs)
 include(KDECMakeSettings)
 include(KDECompilerSettings NO_POLICY_SCOPE)

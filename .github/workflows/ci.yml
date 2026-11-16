@@ -2,7 +2,6 @@ name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -161,17 +160,26 @@ jobs:
     container: fedora:41
     steps:
       - uses: actions/checkout@v5
-      - name: Install the KF6 build toolchain
+      - name: Install the KF6 and QML test toolchain
         # No sudo: the container runs as root. If a package name is wrong for
         # this Fedora, dnf fails loudly here rather than skipping the build.
         run: |
           dnf install -y \
-            cmake extra-cmake-modules qt6-qtbase-devel kf6-kio-devel gcc-c++ file
+            cmake extra-cmake-modules qt6-qtbase-devel qt6-qtdeclarative-devel \
+            kf6-kio-devel kf6-kirigami-devel kf6-kcoreaddons-devel \
+            plasma-workspace libplasma-devel gcc-c++ file
       - name: Configure and build the overlay plugin
         run: |
           cmake -S packaging/dolphin/overlay -B build/overlay \
-            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
           cmake --build build/overlay
+      - name: Run Dolphin overlay and action plugin CTest suite
+        run: ctest --test-dir build/overlay --output-on-failure
+      - name: Run Plasma QML state and SetupWizard regression suite
+        env:
+          QT_QPA_PLATFORM: offscreen
+          LC_ALL: C.UTF-8
+        run: /usr/lib64/qt6/bin/qmltestrunner -input packaging/plasmoid/tests/tst_activity.qml
       - name: A MODULE .so was produced (not a static .a fallback)
         run: |
           so=$(find build/overlay -name 'onedrive-hydration-overlay.so' | head -n1)

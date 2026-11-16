@@ -591,7 +591,10 @@ fn check_facts(facts: &Facts) -> Option<Check> {
         ("socket", &facts.socket),
     ] {
         if !path.is_absolute() {
-            bad.push(format!("{label} ({}) must be an absolute path", path.display()));
+            bad.push(format!(
+                "{label} ({}) must be an absolute path",
+                path.display()
+            ));
             continue;
         }
         match path.to_str() {
@@ -748,29 +751,31 @@ fn collide(actions: &mut [Action], force: bool) -> Vec<String> {
     let mut refusals = Vec::new();
     for a in actions.iter_mut() {
         let replacement = match &*a {
-            Action::WriteFile { path, text, .. } => match read_regular_nofollow(path, we_are_root) {
-                Ok(Some(existing)) if existing == *text => {
-                    Some(Action::Unchanged { path: path.clone() })
-                }
-                Ok(Some(_)) if !force => {
-                    refusals.push(format!(
-                        "{} exists and differs from what would be generated; refusing to \
+            Action::WriteFile { path, text, .. } => {
+                match read_regular_nofollow(path, we_are_root) {
+                    Ok(Some(existing)) if existing == *text => {
+                        Some(Action::Unchanged { path: path.clone() })
+                    }
+                    Ok(Some(_)) if !force => {
+                        refusals.push(format!(
+                            "{} exists and differs from what would be generated; refusing to \
                          change an installed deployment without --force (diff the file \
                          against a --dry-run first)",
-                        path.display()
-                    ));
-                    None
-                }
-                Ok(None) | Ok(Some(_)) => None,
-                Err(e) => {
-                    refusals.push(format!(
-                        "{} cannot be safely inspected ({e}); refusing to follow symlinks or \
+                            path.display()
+                        ));
+                        None
+                    }
+                    Ok(None) | Ok(Some(_)) => None,
+                    Err(e) => {
+                        refusals.push(format!(
+                            "{} cannot be safely inspected ({e}); refusing to follow symlinks or \
                          non-regular files",
-                        path.display()
-                    ));
-                    None
+                            path.display()
+                        ));
+                        None
+                    }
                 }
-            },
+            }
             Action::Symlink { path, target, .. } => match read_link_secure(path, we_are_root) {
                 Ok(Some(existing)) if existing == *target => {
                     Some(Action::Unchanged { path: path.clone() })
@@ -1343,9 +1348,7 @@ fn open_dir_secure(
             Component::Normal(s) => s,
         };
         let seg_bytes = seg.as_encoded_bytes();
-        if matches!(seg_bytes, b".config" | b".local" | b"etc")
-            || seg_bytes.ends_with(b".wants")
-        {
+        if matches!(seg_bytes, b".config" | b".local" | b"etc") || seg_bytes.ends_with(b".wants") {
             in_sensitive = true;
         }
         let seg_c = cstring_os(seg)?;
@@ -1414,10 +1417,7 @@ fn open_dir_secure(
                 if !is_root_top_symlink {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        format!(
-                            "refusing to follow untrusted symlink component {:?}",
-                            seg
-                        ),
+                        format!("refusing to follow untrusted symlink component {:?}", seg),
                     ));
                 }
                 // SAFETY: Verified root-owned top-level symlink; open directory target.

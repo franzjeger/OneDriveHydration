@@ -243,6 +243,18 @@ private:
         bool cloud = false;
         bool unknown = false;
         bool complete = true;
+
+        // Parse `user.hydration.selection` once per directory probe rather than
+        // repeating `lgetxattr` + `QJsonDocument::fromJson` on every `readdir`
+        // entry across Dolphin's UI thread.
+        const QString localDecoded = QFile::decodeName(local);
+        QList<QPair<QString, RootSelection>> activeRoots;
+        for (const auto &root : m_roots) {
+            if (localDecoded == root || localDecoded.startsWith(root + QLatin1Char('/'))) {
+                activeRoots.append({root, loadRootSelection(root)});
+            }
+        }
+
         QList<QPair<QByteArray, int>> queue{{local, 0}};
         for (qsizetype head = 0; head < queue.size(); ++head) {
             const auto entry = queue.at(head);
@@ -267,9 +279,9 @@ private:
                 const QByteArray child = entry.first + '/' + e->d_name;
                 bool excluded = false;
                 const QString childPath = QFile::decodeName(child);
-                for (const auto &root : m_roots) {
-                    if (!childPath.startsWith(root + '/')) continue;
-                    const auto selection = selectionState(root, childPath);
+                for (const auto &rootSel : activeRoots) {
+                    if (!childPath.startsWith(rootSel.first + QLatin1Char('/'))) continue;
+                    const auto selection = rootSel.second.classify(childPath);
                     if (selection == SelectionState::Excluded) excluded = true;
                     if (selection == SelectionState::Unknown) unknown = true;
                 }

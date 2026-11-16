@@ -17,7 +17,10 @@ enum AuthFlow {
 }
 
 enum Command {
-    Auth { force: bool, flow: AuthFlow },
+    Auth {
+        force: bool,
+        flow: AuthFlow,
+    },
     Run {
         mount: PathBuf,
         quota_bytes: Option<u64>,

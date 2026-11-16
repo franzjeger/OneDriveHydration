@@ -27,10 +27,9 @@ fn setup_wizard_candidates(
 ) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(data_home) = xdg_data_home {
-        out.push(
-            data_home
-                .join("plasma/plasmoids/io.github.franzjeger.OneDriveHydration/contents/ui/SetupWizard.qml"),
-        );
+        out.push(data_home.join(
+            "plasma/plasmoids/io.github.franzjeger.OneDriveHydration/contents/ui/SetupWizard.qml",
+        ));
     } else if let Some(h) = home {
         out.push(
             h.join(".local/share/plasma/plasmoids/io.github.franzjeger.OneDriveHydration/contents/ui/SetupWizard.qml"),
@@ -204,7 +203,9 @@ fn main() -> io::Result<()> {
                         .is_ok()
             })
             .unwrap_or("qml6");
-        let status = std::process::Command::new(qml_runner).arg(&script).status()?;
+        let status = std::process::Command::new(qml_runner)
+            .arg(&script)
+            .status()?;
         std::process::exit(status.code().unwrap_or(1));
     }
 
