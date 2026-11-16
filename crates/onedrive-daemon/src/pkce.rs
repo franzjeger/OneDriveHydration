@@ -16,7 +16,6 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::Command;
-use std::thread;
 use std::time::{Duration, Instant};
 
 const AUTHORITY: &str = "login.microsoftonline.com";
@@ -99,29 +98,75 @@ impl BrowserEnrollment {
         exchange: impl FnOnce(&str, &[(&str, &str)]) -> io::Result<TokenResponse>,
         store: impl FnOnce(&RefreshToken) -> io::Result<()>,
     ) -> io::Result<Option<String>> {
+        use rustix::event::{poll, PollFd, PollFlags, Timespec};
+
         let deadline = Instant::now() + timeout;
-        let (mut stream, _) = loop {
-            match self.listener.accept() {
-                Ok(pair) => break pair,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
-                    thread::sleep(Duration::from_millis(25));
+        let (mut stream, query) = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "no browser redirect arrived within 300 seconds; a sandboxed browser may be unable to reach the host loopback listener—copy the printed URL into a host browser and try again",
+                ));
+            }
+            let wait = Timespec {
+                tv_sec: remaining.as_secs() as _,
+                tv_nsec: remaining.subsec_nanos() as _,
+            };
+            let mut fds = [PollFd::new(&self.listener, PollFlags::IN)];
+            if let Err(err) = poll(&mut fds, Some(&wait)) {
+                let io_err = io::Error::from(err);
+                if io_err.kind() == io::ErrorKind::Interrupted {
+                    continue;
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "no browser redirect arrived within 300 seconds; a sandboxed browser may be unable to reach the host loopback listener—copy the printed URL into a host browser and try again",
-                    ));
+                return Err(io_err);
+            }
+            let (mut candidate, _) = match self.listener.accept() {
+                Ok(pair) => pair,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
                 }
                 Err(e) => return Err(e),
+            };
+            candidate.set_nonblocking(false)?;
+            let read_budget = remaining
+                .min(Duration::from_secs(5))
+                .max(Duration::from_millis(50));
+            candidate.set_read_timeout(Some(read_budget))?;
+            candidate.set_write_timeout(Some(Duration::from_secs(10)))?;
+
+            // Tolerate browser TCP preconnects (immediate EOF or idle socket)
+            // and ancillary requests such as `/favicon.ico` so a speculative
+            // connection never aborts the user's real OAuth redirect.
+            let target = match read_request_target(&mut candidate) {
+                Ok(Some(t)) => t,
+                Ok(None) => continue,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::ConnectionReset
+                    ) =>
+                {
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            match target.strip_prefix("/?") {
+                Some(q) => break (candidate, q.to_owned()),
+                None => {
+                    let _ = respond(&mut candidate, 404, "Not found.");
+                    continue;
+                }
             }
         };
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(10)))?;
-        let target = read_request_target(&mut stream)?;
-        let query = target.strip_prefix("/?").ok_or_else(|| {
-            callback_error("the redirect did not target the registered root path")
-        })?;
-        let fields = parse_query(query)?;
+        let fields = parse_query(&query)?;
 
         if one(&fields, "state")? != Some(self.state.as_str()) {
             respond(
@@ -338,12 +383,15 @@ fn one<'a>(fields: &'a [(String, String)], key: &str) -> io::Result<Option<&'a s
     Ok(first)
 }
 
-fn read_request_target(stream: &mut TcpStream) -> io::Result<String> {
+fn read_request_target(stream: &mut TcpStream) -> io::Result<Option<String>> {
     let mut request = Vec::new();
     let mut chunk = [0_u8; 1024];
     while !request.windows(4).any(|w| w == b"\r\n\r\n") {
         let count = stream.read(&mut chunk)?;
         if count == 0 {
+            if request.is_empty() {
+                return Ok(None);
+            }
             return Err(callback_error(
                 "the browser closed the redirect before sending headers",
             ));
@@ -374,13 +422,14 @@ fn read_request_target(stream: &mut TcpStream) -> io::Result<String> {
             "the browser redirect had a malformed request line",
         ));
     }
-    Ok(target.to_owned())
+    Ok(Some(target.to_owned()))
 }
 
 fn respond(stream: &mut TcpStream, status: u16, message: &str) -> io::Result<()> {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        404 => "Not Found",
         _ => "Internal Server Error",
     };
     let body = format!(
@@ -412,6 +461,7 @@ fn safe_diagnostic(value: &str) -> String {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+    use std::thread;
 
     #[test]
     fn pkce_uses_the_rfc_7636_s256_vector() {
@@ -537,5 +587,51 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(response.starts_with("HTTP/1.1 500"));
         assert!(!response.contains("completed and was stored"));
+    }
+
+    #[test]
+    fn preconnect_and_favicon_do_not_abort_real_oauth_callback() {
+        let enrollment = BrowserEnrollment::begin("client-id").unwrap();
+        let state = enrollment.state.clone();
+        let port = enrollment.listener.local_addr().unwrap().port();
+        let worker = thread::spawn(move || {
+            enrollment.complete_with(
+                Duration::from_secs(3),
+                |_, fields| {
+                    assert!(fields.contains(&("code", "after-preconnect")));
+                    Ok(TokenResponse {
+                        refresh_token: Some("refresh-ok".into()),
+                        scope: Some(SCOPE.into()),
+                        error: None,
+                        error_description: None,
+                    })
+                },
+                |refresh| {
+                    assert_eq!(refresh.expose_for_storage(), "refresh-ok");
+                    Ok(())
+                },
+            )
+        });
+
+        // 1. Speculative TCP preconnect that closes immediately with 0 bytes.
+        drop(TcpStream::connect(("127.0.0.1", port)).unwrap());
+
+        // 2. Browser `/favicon.ico` probe -> gets 404, listener stays alive.
+        let mut fav = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        fav.write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .unwrap();
+        let mut fav_reply = String::new();
+        fav.read_to_string(&mut fav_reply).unwrap();
+        assert!(fav_reply.starts_with("HTTP/1.1 404"));
+
+        // 3. Real OAuth callback succeeds.
+        let mut cb = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(
+            cb,
+            "GET /?state={state}&code=after-preconnect HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+        )
+        .unwrap();
+        let scope = worker.join().unwrap().unwrap();
+        assert_eq!(scope.as_deref(), Some(SCOPE));
     }
 }

@@ -14,6 +14,16 @@ struct RootSelection {
     bool valid = true;
     QStringList excludedPrefixes;
 
+    bool operator==(const RootSelection &other) const
+    {
+        return valid == other.valid && excludedPrefixes == other.excludedPrefixes;
+    }
+
+    bool operator!=(const RootSelection &other) const
+    {
+        return !(*this == other);
+    }
+
     SelectionState classify(const QString &path) const
     {
         if (!valid) return SelectionState::Unknown;

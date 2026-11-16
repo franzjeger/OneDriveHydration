@@ -8,6 +8,7 @@
 
 #include <QDBusConnection>
 #include <QFile>
+#include <QFileInfo>
 #include <QFileSystemWatcher>
 #include <QHash>
 #include <QStandardPaths>
@@ -156,7 +157,10 @@ private:
     {
         // Root selection changes must remain watched even after many listings.
         if (m_roots.contains(path)) {
-            if (!m_watcher.directories().contains(path)) m_watcher.addPath(path);
+            if (!m_watcher.directories().contains(path))
+                m_watcher.addPath(path);
+            if (!m_selections.contains(path))
+                m_selections.insert(path, loadRootSelection(path));
             return;
         }
         // Keep resource use bounded when navigating many folders. A relisted
@@ -176,9 +180,20 @@ private:
 
     void metadataChanged(const QString &path)
     {
-        if (m_roots.contains(path))
-            for (const auto &child : std::as_const(m_watched))
-                Q_EMIT overlaysChanged(QUrl::fromLocalFile(child), badges(child));
+        if (m_roots.contains(path)) {
+            // Only fan out across all watched children when `user.hydration.selection`
+            // on the root actually changed — ordinary top-level file/manifest saves
+            // fire `directoryChanged(root)` too and must not trigger 512 UI-thread
+            // directory/xattr walks.
+            const RootSelection current = loadRootSelection(path);
+            if (!m_selections.contains(path) || m_selections.value(path) != current) {
+                m_selections.insert(path, current);
+                for (const auto &child : std::as_const(m_watched)) {
+                    if (child == path || child.startsWith(path + QLatin1Char('/')))
+                        Q_EMIT overlaysChanged(QUrl::fromLocalFile(child), badges(child));
+                }
+            }
+        }
         const bool pinned = lgetxattr(QFile::encodeName(path).constData(), "user.hydration.pinned", nullptr, 0) >= 0;
         if (m_pins.value(path) != pinned) {
             m_pins.insert(path, pinned);
@@ -312,9 +327,19 @@ private:
         return ContentState::Clean;
     }
 
+    void addConfiguredRoot(const QString &raw)
+    {
+        if (raw.isEmpty() || m_roots.contains(raw))
+            return;
+        m_roots.append(raw);
+        m_watcher.addPath(raw);
+        m_selections.insert(raw, loadRootSelection(raw));
+    }
+
     void loadRoots()
     {
         m_roots.clear();
+        m_selections.clear();
         QFile f(rootsConfigPath());
         if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
             return;
@@ -325,11 +350,17 @@ private:
                 continue;
             // Store without a trailing slash; isUnderRoot re-adds one so that a
             // root of /home/u/OneDrive matches /home/u/OneDrive/x but not a
-            // sibling /home/u/OneDriveBackup.
+            // sibling /home/u/OneDriveBackup. Also register `canonicalFilePath()`
+            // when different (e.g. `/home -> /var/home` on ostree desktops) so
+            // canonicalized URLs match `hydrationactions.cpp`.
             while (line.endsWith(QLatin1Char('/')) && line.size() > 1)
                 line.chop(1);
-            m_roots.append(line);
-            m_watcher.addPath(line);
+            addConfiguredRoot(line);
+            QString canonical = QFileInfo(line).canonicalFilePath();
+            while (canonical.endsWith(QLatin1Char('/')) && canonical.size() > 1)
+                canonical.chop(1);
+            if (!canonical.isEmpty())
+                addConfiguredRoot(canonical);
         }
     }
 
@@ -348,6 +379,7 @@ private:
     QFileSystemWatcher m_watcher;
     QStringList m_watched;
     QHash<QString, bool> m_pins;
+    QHash<QString, RootSelection> m_selections;
 };
 
 #include "hydrationoverlay.moc"

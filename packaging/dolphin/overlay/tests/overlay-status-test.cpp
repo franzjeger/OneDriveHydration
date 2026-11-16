@@ -166,6 +166,40 @@ int main(int argc, char **argv)
     QTimer::singleShot(2000, &loop, &QEventLoop::quit);
     loop.exec();
     require(stampRefreshed, "metadata-only upload completion refreshes the badge");
+
+    // Verify top-level directory churn (`.hydration-manifest` atomic save) does NOT
+    // fan out spurious `overlaysChanged` across unrelated watched children when
+    // `user.hydration.selection` is unchanged, while an actual selection change DOES.
+    QCoreApplication::processEvents();
+    bool unrelatedChildStorm = false;
+    auto conn = QObject::connect(plugin, &KOverlayIconPlugin::overlaysChanged,
+        [&](const QUrl &url, const QStringList &) {
+            if (url.toLocalFile() == root + "/empty/pinned.txt")
+                unrelatedChildStorm = true;
+        });
+    file(root + "/.hydration-manifest");
+    QCoreApplication::processEvents();
+    QEventLoop quietLoop;
+    QTimer::singleShot(150, &quietLoop, &QEventLoop::quit);
+    quietLoop.exec();
+    QObject::disconnect(conn);
+    require(!unrelatedChildStorm, "unrelated root directory write must not fan out to all watched children");
+
+    QEventLoop selLoop;
+    bool selectionPushed = false;
+    QObject::connect(plugin, &KOverlayIconPlugin::overlaysChanged, &selLoop,
+        [&](const QUrl &url, const QStringList &badges) {
+            if (url.toLocalFile() == root + "/empty/pinned.txt"
+                && badges == QStringList{"onedrive-hydration-excluded"}) {
+                selectionPushed = true;
+                selLoop.quit();
+            }
+        });
+    attribute(root, "user.hydration.selection", "[\"empty\"]");
+    QTimer::singleShot(2000, &selLoop, &QEventLoop::quit);
+    selLoop.exec();
+    require(selectionPushed, "root selection change refreshes watched children");
+
     fprintf(stdout, "PASS: real plugin content states, folder bounds, root scoping, ancestor and metadata refresh\n");
     return 0;
 }
