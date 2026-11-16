@@ -188,25 +188,63 @@ impl Rendered {
 /// to state the choice: `Rendered` is documented as everything the installer
 /// writes, and a second call site that quietly rendered the default would put
 /// back the second icon this argument exists to prevent.
-pub fn render(t: &Templates, f: &Facts, tray: Tray) -> Rendered {
-    let mount = f.mount.to_string_lossy().into_owned();
-    let socket = f.socket.to_string_lossy().into_owned();
-    let home = f.home.to_string_lossy().into_owned();
-    let bin = f.bin_dir.to_string_lossy().into_owned();
+/// Quote an argument for systemd `ExecStart=` / `RequiresMountsFor=` /
+/// `ReadWritePaths=` only when it contains characters systemd splits or
+/// unquotes on. Plain paths stay byte-for-byte unchanged so existing
+/// deployments do not show artificial drift.
+pub fn quote_systemd_arg(s: &str) -> String {
+    if !s.is_empty()
+        && !s
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\'))
+    {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        if matches!(ch, '"' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    out
+}
 
-    let mount_user = f
+pub fn render(t: &Templates, f: &Facts, tray: Tray) -> Rendered {
+    let mount_raw = f.mount.to_string_lossy().into_owned();
+    let socket_raw = f.socket.to_string_lossy().into_owned();
+    let home_raw = f.home.to_string_lossy().into_owned();
+    let bin_raw = f.bin_dir.to_string_lossy().into_owned();
+
+    let mount_user_raw = f
         .mount
         .strip_prefix(&f.home)
         .map(|rest| format!("%h/{}", rest.to_string_lossy()))
-        .unwrap_or_else(|_| mount.clone());
-    let socket_user = f
+        .unwrap_or_else(|_| mount_raw.clone());
+    let socket_user_raw = f
         .socket
         .strip_prefix(format!("/run/user/{}", f.uid))
         .map(|rest| format!("%t/{}", rest.to_string_lossy()))
-        .unwrap_or_else(|_| socket.clone());
+        .unwrap_or_else(|_| socket_raw.clone());
+
+    let mount = quote_systemd_arg(&mount_raw);
+    let mount_user = quote_systemd_arg(&mount_user_raw);
+    let socket = quote_systemd_arg(&socket_raw);
+    let socket_user = quote_systemd_arg(&socket_user_raw);
+    let home = quote_systemd_arg(&home_raw);
+    let hydrationd_bin = quote_systemd_arg(&format!("{bin_raw}/hydrationd"));
+    let daemon_bin = quote_systemd_arg(&format!("{bin_raw}/onedrive-hydration-daemon"));
+    let dbus_bin = quote_systemd_arg(&format!("{bin_raw}/onedrive-hydration-dbus"));
+    let tray_bin = quote_systemd_arg(&format!("{bin_raw}/onedrive-hydration-tray"));
 
     let sub = |template: &str| -> String {
         template
+            .replace("@BIN@/hydrationd", &hydrationd_bin)
+            .replace("@BIN@/onedrive-hydration-daemon", &daemon_bin)
+            .replace("@BIN@/onedrive-hydration-dbus", &dbus_bin)
+            .replace("@BIN@/onedrive-hydration-tray", &tray_bin)
             .replace("@USER@", &f.user)
             .replace("@UID@", &f.uid.to_string())
             .replace("@HOME@", &home)
@@ -215,7 +253,7 @@ pub fn render(t: &Templates, f: &Facts, tray: Tray) -> Rendered {
             .replace("@SOCKET_USER@", &socket_user)
             .replace("@SOCKET@", &socket)
             .replace("@CLIENT_ID@", &f.client_id)
-            .replace("@BIN@", &bin)
+            .replace("@BIN@", &bin_raw)
     };
 
     let mut user = vec![

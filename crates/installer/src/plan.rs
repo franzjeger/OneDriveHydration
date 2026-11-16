@@ -561,6 +561,63 @@ fn check_binaries(bin_dir: &Path, tray: Tray) -> Check {
     }
 }
 
+fn check_facts(facts: &Facts) -> Option<Check> {
+    let mut bad = Vec::new();
+    if facts.user.is_empty()
+        || facts.user.chars().any(|c| {
+            c.is_whitespace() || c.is_control() || matches!(c, '@' | '"' | '\'' | '\\' | '%' | '$')
+        })
+    {
+        bad.push(format!(
+            "user {:?} contains unsafe unit/machine characters",
+            facts.user
+        ));
+    }
+    if facts.client_id.is_empty()
+        || !facts
+            .client_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        bad.push(format!(
+            "client_id {:?} must contain only ASCII alphanumerics, '-', '_' or '.'",
+            facts.client_id
+        ));
+    }
+    for (label, path) in [
+        ("mount", &facts.mount),
+        ("home", &facts.home),
+        ("bin_dir", &facts.bin_dir),
+        ("socket", &facts.socket),
+    ] {
+        if !path.is_absolute() {
+            bad.push(format!("{label} ({}) must be an absolute path", path.display()));
+            continue;
+        }
+        match path.to_str() {
+            None => bad.push(format!("{label} ({}) must be valid UTF-8", path.display())),
+            Some(s) if s.chars().any(|c| c.is_control() || matches!(c, '%' | '$')) => {
+                bad.push(format!(
+                    "{label} ({}) contains control characters or systemd '%'/ '$' specifiers",
+                    path.display()
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    if bad.is_empty() {
+        None
+    } else {
+        Some(Check {
+            name: "facts",
+            outcome: Outcome::Refuse(format!(
+                "refusing unsafe deployment parameters that could corrupt systemd units or /etc/fstab: {}",
+                bad.join("; ")
+            )),
+        })
+    }
+}
+
 fn check_unit_text(rendered: &Rendered) -> Check {
     let mut hits = Vec::new();
     for unit in rendered.all() {
@@ -686,12 +743,16 @@ fn retire_tray_unit(facts: &Facts, opts: &Options) -> Vec<Action> {
 /// Idempotence: rewrite nothing that is already right, refuse to change what
 /// is different, unless forced. Returns refusal messages.
 fn collide(actions: &mut [Action], force: bool) -> Vec<String> {
+    // SAFETY: `geteuid` has no preconditions and takes no arguments.
+    let we_are_root = unsafe { libc::geteuid() } == 0;
     let mut refusals = Vec::new();
     for a in actions.iter_mut() {
         let replacement = match &*a {
-            Action::WriteFile { path, text, .. } => match std::fs::read_to_string(path) {
-                Ok(existing) if existing == *text => Some(Action::Unchanged { path: path.clone() }),
-                Ok(_) if !force => {
+            Action::WriteFile { path, text, .. } => match read_regular_nofollow(path, we_are_root) {
+                Ok(Some(existing)) if existing == *text => {
+                    Some(Action::Unchanged { path: path.clone() })
+                }
+                Ok(Some(_)) if !force => {
                     refusals.push(format!(
                         "{} exists and differs from what would be generated; refusing to \
                          change an installed deployment without --force (diff the file \
@@ -700,13 +761,21 @@ fn collide(actions: &mut [Action], force: bool) -> Vec<String> {
                     ));
                     None
                 }
-                _ => None,
+                Ok(None) | Ok(Some(_)) => None,
+                Err(e) => {
+                    refusals.push(format!(
+                        "{} cannot be safely inspected ({e}); refusing to follow symlinks or \
+                         non-regular files",
+                        path.display()
+                    ));
+                    None
+                }
             },
-            Action::Symlink { path, target, .. } => match std::fs::read_link(path) {
-                Ok(existing) if existing == *target => {
+            Action::Symlink { path, target, .. } => match read_link_secure(path, we_are_root) {
+                Ok(Some(existing)) if existing == *target => {
                     Some(Action::Unchanged { path: path.clone() })
                 }
-                Ok(other) if !force => {
+                Ok(Some(other)) if !force => {
                     refusals.push(format!(
                         "{} is a symlink to {} (expected {}); refusing without --force",
                         path.display(),
@@ -715,7 +784,14 @@ fn collide(actions: &mut [Action], force: bool) -> Vec<String> {
                     ));
                     None
                 }
-                _ => None,
+                Ok(None) | Ok(Some(_)) => None,
+                Err(e) => {
+                    refusals.push(format!(
+                        "{} cannot be safely inspected ({e}); refusing to traverse untrusted symlinks",
+                        path.display()
+                    ));
+                    None
+                }
             },
             _ => None,
         };
@@ -735,6 +811,11 @@ pub fn install(
 ) -> Planned {
     let mut checks = Vec::new();
 
+    if let Some(bad_facts) = check_facts(facts) {
+        checks.push(bad_facts);
+    }
+
+    // SAFETY: `geteuid` has no preconditions and takes no arguments.
     if opts.real() && unsafe { libc::geteuid() } != 0 {
         checks.push(Check {
             name: "root",
@@ -1089,25 +1170,17 @@ fn at<T>(r: io::Result<T>, what: &str, path: &Path) -> io::Result<T> {
 }
 
 fn execute_inner(actions: &[Action], mode: ExecMode, log: &mut Vec<String>) -> io::Result<()> {
+    // SAFETY: `geteuid` has no preconditions and takes no arguments.
     let we_are_root = unsafe { libc::geteuid() } == 0;
     for action in actions {
         match action {
             Action::WriteFile { path, text, owner } => {
                 if mode.write_files {
                     at(
-                        create_dirs_owned(path.parent().unwrap(), *owner, we_are_root),
-                        "creating directories for",
+                        write_file_secure(path, text.as_bytes(), *owner, we_are_root),
+                        "writing",
                         path,
                     )?;
-                    // Write-then-rename so a crash cannot leave a half unit
-                    // for systemd to half-load. The temporary keeps the real
-                    // name plus a suffix systemd does not load.
-                    let mut name = path.file_name().unwrap_or_default().to_os_string();
-                    name.push(".tmp-install");
-                    let tmp = path.with_file_name(name);
-                    at(std::fs::write(&tmp, text), "writing", &tmp)?;
-                    at(chown_if(&tmp, *owner, we_are_root), "chowning", &tmp)?;
-                    at(std::fs::rename(&tmp, path), "renaming into place", path)?;
                     log.push(format!("wrote {}", path.display()));
                 } else {
                     log.push(format!("would write {}", path.display()));
@@ -1119,16 +1192,11 @@ fn execute_inner(actions: &[Action], mode: ExecMode, log: &mut Vec<String>) -> i
                 owner,
             } => {
                 if mode.write_files {
-                    create_dirs_owned(path.parent().unwrap(), *owner, we_are_root)?;
-                    match std::fs::read_link(path) {
-                        Ok(existing) if existing == *target => {}
-                        Ok(_) => {
-                            std::fs::remove_file(path)?;
-                            std::os::unix::fs::symlink(target, path)?;
-                        }
-                        Err(_) => std::os::unix::fs::symlink(target, path)?,
-                    }
-                    lchown_if(path, *owner, we_are_root)?;
+                    at(
+                        write_symlink_secure(path, target, *owner, we_are_root),
+                        "enabling symlink",
+                        path,
+                    )?;
                     log.push(format!(
                         "enabled {} -> {}",
                         path.display(),
@@ -1147,25 +1215,10 @@ fn execute_inner(actions: &[Action], mode: ExecMode, log: &mut Vec<String>) -> i
             }
             Action::AppendFstab { path, line } => {
                 if mode.write_files {
-                    use std::io::Write as _;
                     at(
-                        create_dirs_owned(path.parent().unwrap(), None, we_are_root),
-                        "creating directories for",
+                        append_fstab_secure(path, line, we_are_root),
+                        "appending to",
                         path,
-                    )?;
-                    let mut f = at(
-                        std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(path),
-                        "opening for append",
-                        path,
-                    )?;
-                    writeln!(
-                        f,
-                        "# OneDrive hydration sync root. noauto on purpose: the mount \
-                         must not exist\n# before the helper that marks it (see \
-                         hydrationd.service).\n{line}"
                     )?;
                     log.push(format!("appended to {}: {line}", path.display()));
                 } else {
@@ -1174,12 +1227,9 @@ fn execute_inner(actions: &[Action], mode: ExecMode, log: &mut Vec<String>) -> i
             }
             Action::RemoveFile { path } => {
                 if mode.write_files {
-                    match std::fs::remove_file(path) {
-                        Ok(()) => log.push(format!("removed {}", path.display())),
-                        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                            log.push(format!("already absent {}", path.display()))
-                        }
-                        Err(e) => return at(Err(e), "removing", path),
+                    match at(remove_file_secure(path, we_are_root), "removing", path)? {
+                        true => log.push(format!("removed {}", path.display())),
+                        false => log.push(format!("already absent {}", path.display())),
                     }
                 } else {
                     log.push(format!("would remove {}", path.display()));
@@ -1229,54 +1279,421 @@ fn execute_inner(actions: &[Action], mode: ExecMode, log: &mut Vec<String>) -> i
     Ok(())
 }
 
-fn create_dirs_owned(dir: &Path, owner: Option<(u32, u32)>, root: bool) -> io::Result<()> {
-    // Walk down creating one level at a time so each *newly created* directory
-    // can be chowned; pre-existing ones are left alone — an installer that
-    // re-owns ~/.config wholesale would be a different kind of hazard.
-    let mut stack = Vec::new();
-    let mut cur = dir;
-    while !cur.exists() {
-        stack.push(cur.to_path_buf());
-        match cur.parent() {
-            Some(p) => cur = p,
-            None => break,
+fn cstring_os(s: &std::ffi::OsStr) -> io::Result<std::ffi::CString> {
+    std::ffi::CString::new(s.as_encoded_bytes())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+}
+
+fn leaf_name(path: &Path) -> io::Result<(&Path, std::ffi::CString)> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "target path has no parent directory",
+        )
+    })?;
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "target path has no leaf name")
+    })?;
+    Ok((parent, cstring_os(name)?))
+}
+
+/// Traverse `dir` from `/` component-by-component using `openat(..., O_NOFOLLOW)`
+/// so an unprivileged user cannot plant symlinks under `~user/.config` (or `.local`)
+/// to trick a `root` installer into creating, overwriting, chowning, or unlinking
+/// arbitrary files outside their directory tree.
+fn open_dir_secure(
+    dir: &Path,
+    create: bool,
+    owner: Option<(u32, u32)>,
+    we_are_root: bool,
+) -> io::Result<Option<std::os::fd::OwnedFd>> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::path::Component;
+
+    let abs = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(dir)
+    };
+    let root_c = std::ffi::CString::new("/").expect("static C literal");
+    // SAFETY: `root_c` is a valid NUL-terminated string `"/"`.
+    let root_raw = unsafe {
+        libc::open(
+            root_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if root_raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `root_raw >= 0` is a freshly opened descriptor owned exclusively here.
+    let mut cur = unsafe { OwnedFd::from_raw_fd(root_raw) };
+    let mut in_sensitive = false;
+
+    for comp in abs.components() {
+        let seg = match comp {
+            Component::RootDir | Component::CurDir => continue,
+            Component::ParentDir => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "refusing '..' component in installation path",
+                ));
+            }
+            Component::Prefix(_) => continue,
+            Component::Normal(s) => s,
+        };
+        let seg_bytes = seg.as_encoded_bytes();
+        if matches!(seg_bytes, b".config" | b".local" | b"etc")
+            || seg_bytes.ends_with(b".wants")
+        {
+            in_sensitive = true;
+        }
+        let seg_c = cstring_os(seg)?;
+        // SAFETY: `cur` is a valid directory fd and `seg_c` is NUL-terminated.
+        let next_raw = unsafe {
+            libc::openat(
+                cur.as_raw_fd(),
+                seg_c.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if next_raw >= 0 {
+            // SAFETY: `next_raw >= 0` is a newly opened directory descriptor.
+            cur = unsafe { OwnedFd::from_raw_fd(next_raw) };
+            continue;
+        }
+        let err = io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::ENOENT) => {
+                if !create {
+                    return Ok(None);
+                }
+                // SAFETY: `cur` is open and `seg_c` is a valid C string.
+                let mk = unsafe { libc::mkdirat(cur.as_raw_fd(), seg_c.as_ptr(), 0o755) };
+                if mk < 0 {
+                    let mk_err = io::Error::last_os_error();
+                    if mk_err.raw_os_error() != Some(libc::EEXIST) {
+                        return Err(mk_err);
+                    }
+                }
+                // SAFETY: Re-open with `O_NOFOLLOW` so a concurrent symlink race fails closed.
+                let created_raw = unsafe {
+                    libc::openat(
+                        cur.as_raw_fd(),
+                        seg_c.as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    )
+                };
+                if created_raw < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: `created_raw >= 0` is owned exclusively here.
+                let created_fd = unsafe { OwnedFd::from_raw_fd(created_raw) };
+                if mk == 0 {
+                    fchown_fd(created_fd.as_raw_fd(), owner, we_are_root)?;
+                }
+                cur = created_fd;
+            }
+            Some(libc::ELOOP) | Some(libc::ENOTDIR) => {
+                // Allow a root-owned top-level administrative symlink (e.g. `/home -> /mnt/home`),
+                // never a user-owned symlink or any symlink inside `.config`, `.local`, or `etc`.
+                let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                // SAFETY: `cur` is open, `seg_c` is valid, and `st` is writable `libc::stat`.
+                let st_rc = unsafe {
+                    libc::fstatat(
+                        cur.as_raw_fd(),
+                        seg_c.as_ptr(),
+                        &mut st,
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                };
+                let is_root_top_symlink = st_rc == 0
+                    && (st.st_mode & libc::S_IFMT) == libc::S_IFLNK
+                    && st.st_uid == 0
+                    && !in_sensitive;
+                if !is_root_top_symlink {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "refusing to follow untrusted symlink component {:?}",
+                            seg
+                        ),
+                    ));
+                }
+                // SAFETY: Verified root-owned top-level symlink; open directory target.
+                let followed = unsafe {
+                    libc::openat(
+                        cur.as_raw_fd(),
+                        seg_c.as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                    )
+                };
+                if followed < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: `followed >= 0` is owned exclusively here.
+                cur = unsafe { OwnedFd::from_raw_fd(followed) };
+            }
+            _ => return Err(err),
         }
     }
-    for d in stack.into_iter().rev() {
-        std::fs::create_dir(&d)?;
-        chown_if(&d, owner, root)?;
-    }
-    Ok(())
+    Ok(Some(cur))
 }
 
-fn chown_if(path: &Path, owner: Option<(u32, u32)>, root: bool) -> io::Result<()> {
-    chown_impl(path, owner, root, false)
-}
-
-/// Symlinks need `lchown`: following the link would chown its target, which
-/// in a rehearsal prefix is a dangling runtime path.
-fn lchown_if(path: &Path, owner: Option<(u32, u32)>, root: bool) -> io::Result<()> {
-    chown_impl(path, owner, root, true)
-}
-
-fn chown_impl(path: &Path, owner: Option<(u32, u32)>, root: bool, link: bool) -> io::Result<()> {
-    // Without root, chown would fail and the files already belong to us —
-    // which in a prefix rehearsal is exactly right.
+fn fchown_fd(fd: libc::c_int, owner: Option<(u32, u32)>, we_are_root: bool) -> io::Result<()> {
     let Some((uid, gid)) = owner else {
         return Ok(());
     };
-    if !root {
+    if !we_are_root {
         return Ok(());
     }
-    let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let rc = if link {
-        unsafe { libc::lchown(c.as_ptr(), uid, gid) }
-    } else {
-        unsafe { libc::chown(c.as_ptr(), uid, gid) }
-    };
+    // SAFETY: `fd` is an open descriptor owned by the caller; `fchown` never follows paths.
+    let rc = unsafe { libc::fchown(fd, uid, gid) };
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+fn read_regular_nofollow(path: &Path, we_are_root: bool) -> io::Result<Option<String>> {
+    use std::io::Read as _;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let (parent, leaf) = leaf_name(path)?;
+    let Some(dir_fd) = open_dir_secure(parent, false, None, we_are_root)? else {
+        return Ok(None);
+    };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `dir_fd` is open, `leaf` is valid C string, `st` is valid output storage.
+    let st_rc = unsafe {
+        libc::fstatat(
+            dir_fd.as_raw_fd(),
+            leaf.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if st_rc < 0 {
+        let e = io::Error::last_os_error();
+        if e.raw_os_error() == Some(libc::ENOENT) {
+            return Ok(None);
+        }
+        return Err(e);
+    }
+    if (st.st_mode & libc::S_IFMT) != libc::S_IFREG {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "existing entry is a symlink or non-regular file",
+        ));
+    }
+    // SAFETY: `dir_fd` is open and `O_NOFOLLOW` prevents racing replacement with a symlink.
+    let raw = unsafe {
+        libc::openat(
+            dir_fd.as_raw_fd(),
+            leaf.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `raw >= 0` is a freshly opened regular-file descriptor.
+    let mut file = unsafe { std::fs::File::from_raw_fd(raw) };
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(Some(text))
+}
+
+fn read_link_secure(path: &Path, we_are_root: bool) -> io::Result<Option<PathBuf>> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStringExt;
+
+    let (parent, leaf) = leaf_name(path)?;
+    let Some(dir_fd) = open_dir_secure(parent, false, None, we_are_root)? else {
+        return Ok(None);
+    };
+    let mut buf = vec![0u8; 4096];
+    // SAFETY: `dir_fd` is open, `leaf` is valid C string, `buf` has `buf.len()` writable bytes.
+    let n = unsafe {
+        libc::readlinkat(
+            dir_fd.as_raw_fd(),
+            leaf.as_ptr(),
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+        )
+    };
+    if n < 0 {
+        let e = io::Error::last_os_error();
+        if e.raw_os_error() == Some(libc::ENOENT) {
+            return Ok(None);
+        }
+        return Err(e);
+    }
+    buf.truncate(n as usize);
+    Ok(Some(PathBuf::from(std::ffi::OsString::from_vec(buf))))
+}
+
+fn write_file_secure(
+    path: &Path,
+    bytes: &[u8],
+    owner: Option<(u32, u32)>,
+    we_are_root: bool,
+) -> io::Result<()> {
+    use std::io::Write as _;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let (parent, leaf) = leaf_name(path)?;
+    let dir_fd = open_dir_secure(parent, true, owner, we_are_root)?
+        .expect("create=true always yields a directory fd");
+
+    let mut tmp_os = path.file_name().unwrap_or_default().to_os_string();
+    tmp_os.push(".tmp-install");
+    let tmp_c = cstring_os(&tmp_os)?;
+
+    // Remove any stale `.tmp-install` entry (including a user-planted symlink)
+    // without following it before opening `O_CREAT | O_EXCL | O_NOFOLLOW`.
+    // SAFETY: `dir_fd` is open and `tmp_c` is NUL-terminated; flags=0 unlinks non-directories.
+    let _ = unsafe { libc::unlinkat(dir_fd.as_raw_fd(), tmp_c.as_ptr(), 0) };
+
+    // SAFETY: `dir_fd` is open; `O_CREAT | O_EXCL | O_NOFOLLOW` guarantees a brand-new inode.
+    let raw = unsafe {
+        libc::openat(
+            dir_fd.as_raw_fd(),
+            tmp_c.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o644,
+        )
+    };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `raw >= 0` is owned exclusively here.
+    let mut file = unsafe { std::fs::File::from_raw_fd(raw) };
+    let write_res = (|| -> io::Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fchown_fd(file.as_raw_fd(), owner, we_are_root)?;
+        Ok(())
+    })();
+    drop(file);
+    if let Err(e) = write_res {
+        // SAFETY: Clean up partial temp file inside `dir_fd`.
+        let _ = unsafe { libc::unlinkat(dir_fd.as_raw_fd(), tmp_c.as_ptr(), 0) };
+        return Err(e);
+    }
+
+    // SAFETY: `dir_fd` is open; `renameat` atomically replaces `leaf` without following symlinks.
+    let ren = unsafe {
+        libc::renameat(
+            dir_fd.as_raw_fd(),
+            tmp_c.as_ptr(),
+            dir_fd.as_raw_fd(),
+            leaf.as_ptr(),
+        )
+    };
+    if ren != 0 {
+        let e = io::Error::last_os_error();
+        let _ = unsafe { libc::unlinkat(dir_fd.as_raw_fd(), tmp_c.as_ptr(), 0) };
+        return Err(e);
+    }
+    Ok(())
+}
+
+fn write_symlink_secure(
+    path: &Path,
+    target: &Path,
+    owner: Option<(u32, u32)>,
+    we_are_root: bool,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let (parent, leaf) = leaf_name(path)?;
+    let target_c = cstring_os(target.as_os_str())?;
+    let dir_fd = open_dir_secure(parent, true, owner, we_are_root)?
+        .expect("create=true always yields a directory fd");
+
+    if read_link_secure(path, we_are_root)?.as_deref() != Some(target) {
+        // SAFETY: `dir_fd` is open and `leaf` is valid; removes stale symlink/file without following it.
+        let ul = unsafe { libc::unlinkat(dir_fd.as_raw_fd(), leaf.as_ptr(), 0) };
+        if ul != 0 {
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::ENOENT) {
+                return Err(e);
+            }
+        }
+        // SAFETY: `target_c` and `leaf` are valid C strings; creates symlink inside `dir_fd`.
+        let sl = unsafe { libc::symlinkat(target_c.as_ptr(), dir_fd.as_raw_fd(), leaf.as_ptr()) };
+        if sl != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+
+    if let Some((uid, gid)) = owner {
+        if we_are_root {
+            // SAFETY: `AT_SYMLINK_NOFOLLOW` chowns the symlink itself, never its target.
+            let rc = unsafe {
+                libc::fchownat(
+                    dir_fd.as_raw_fd(),
+                    leaf.as_ptr(),
+                    uid,
+                    gid,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if rc != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn append_fstab_secure(path: &Path, line: &str, we_are_root: bool) -> io::Result<()> {
+    use std::io::Write as _;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let (parent, leaf) = leaf_name(path)?;
+    let dir_fd = open_dir_secure(parent, true, None, we_are_root)?
+        .expect("create=true always yields a directory fd");
+    // SAFETY: `O_NOFOLLOW` prevents appending to an arbitrary file via a symlinked fstab.
+    let raw = unsafe {
+        libc::openat(
+            dir_fd.as_raw_fd(),
+            leaf.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o644,
+        )
+    };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `raw >= 0` is a freshly opened descriptor.
+    let mut f = unsafe { std::fs::File::from_raw_fd(raw) };
+    writeln!(
+        f,
+        "# OneDrive hydration sync root. noauto on purpose: the mount \
+         must not exist\n# before the helper that marks it (see \
+         hydrationd.service).\n{line}"
+    )?;
+    f.sync_all()
+}
+
+fn remove_file_secure(path: &Path, we_are_root: bool) -> io::Result<bool> {
+    use std::os::fd::AsRawFd;
+
+    let (parent, leaf) = leaf_name(path)?;
+    let Some(dir_fd) = open_dir_secure(parent, false, None, we_are_root)? else {
+        return Ok(false);
+    };
+    // SAFETY: `dir_fd` is verified free of untrusted symlinks; `unlinkat` never follows `leaf`.
+    let rc = unsafe { libc::unlinkat(dir_fd.as_raw_fd(), leaf.as_ptr(), 0) };
+    if rc == 0 {
+        return Ok(true);
+    }
+    let e = io::Error::last_os_error();
+    if e.raw_os_error() == Some(libc::ENOENT) {
+        Ok(false)
+    } else {
+        Err(e)
+    }
 }

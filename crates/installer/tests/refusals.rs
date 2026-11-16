@@ -1442,3 +1442,105 @@ fn cli_without_arguments_prints_usage_and_the_never_list() {
     assert!(stderr.contains("--consent-fstab"), "{stderr}");
     assert!(stderr.contains("never"), "{stderr}");
 }
+
+#[test]
+fn symlinked_user_config_dir_and_tmp_symlink_never_redirect_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let victim = tmp.path().join("victim");
+    std::fs::create_dir_all(&victim).unwrap();
+    let secret = victim.join("onedrive-hydration.service");
+    std::fs::write(&secret, "root-owned-secret\n").unwrap();
+
+    // 1. User plants ~/.config -> victim directory before install.
+    let prefix = tmp.path().join("p1");
+    let user_home = prefix.join("home/u");
+    std::fs::create_dir_all(&user_home).unwrap();
+    std::os::unix::fs::symlink(&victim, user_home.join(".config")).unwrap();
+
+    let f = facts("/home/u/OneDrive", &payload_dir(tmp.path()));
+    let planned = install(&f, &Templates::default(), &good_observed(), &opts(&prefix));
+    let msg = refusal(&planned, "collision");
+    assert!(msg.contains("symlink"), "{msg}");
+
+    // Even if execute() is invoked directly against a raced symlink at ~/.config,
+    // open_dir_secure refuses the symlink and leaves `victim` untouched.
+    let direct = vec![Action::WriteFile {
+        path: user_home.join(".config/systemd/user/onedrive-hydration.service"),
+        text: "injected\n".into(),
+        owner: Some((1234, 1234)),
+    }];
+    let (_, res) = execute(
+        &direct,
+        ExecMode {
+            write_files: true,
+            run_commands: false,
+        },
+    );
+    assert!(res.is_err(), "symlinked .config must fail closed");
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "root-owned-secret\n");
+
+    // 2. User plants `.tmp-install` symlink inside real ~/.config/systemd/user.
+    let prefix2 = tmp.path().join("p2");
+    let real_user_dir = prefix2.join("home/u/.config/systemd/user");
+    std::fs::create_dir_all(&real_user_dir).unwrap();
+    std::os::unix::fs::symlink(
+        &secret,
+        real_user_dir.join("onedrive-hydration.service.tmp-install"),
+    )
+    .unwrap();
+    let direct2 = vec![Action::WriteFile {
+        path: real_user_dir.join("onedrive-hydration.service"),
+        text: "safe-unit\n".into(),
+        owner: Some((1234, 1234)),
+    }];
+    let (_, res2) = execute(
+        &direct2,
+        ExecMode {
+            write_files: true,
+            run_commands: false,
+        },
+    );
+    assert!(res2.is_ok(), "{res2:?}");
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "root-owned-secret\n");
+    assert_eq!(
+        std::fs::read_to_string(real_user_dir.join("onedrive-hydration.service")).unwrap(),
+        "safe-unit\n"
+    );
+}
+
+#[test]
+fn mount_with_spaces_is_escaped_in_fstab_and_quoted_in_units() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = facts("/home/u/My OneDrive", &payload_dir(tmp.path()));
+    let table = "\
+40 1 0:33 /@ / rw,noatime shared:1 - btrfs /dev/sda2 rw,subvolid=256,subvol=/@
+90 40 0:33 /@my\\040onedrive /home/u/My\\040OneDrive rw,noatime shared:3 - btrfs /dev/sda2 rw,subvolid=300,subvol=/@my\\040onedrive
+";
+    let rows = probes::parse_mountinfo(table);
+    let row = probes::find_mount(&rows, &f.mount).expect("mount with space must resolve");
+    let line = probes::fstab_suggestion(row);
+    assert!(line.contains("/home/u/My\\040OneDrive"), "{line}");
+    assert_eq!(probes::fstab_entry(&line, &f.mount), probes::FstabEntry::NoAuto);
+
+    let rendered = units::render(&Templates::default(), &f, Tray::Sni);
+    assert!(rendered.system[0].text.contains("--mount \"/home/u/My OneDrive\""));
+    assert!(rendered.user[0].text.contains("--mount \"%h/My OneDrive\""));
+}
+
+#[test]
+fn unsafe_control_or_specifier_characters_in_facts_are_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let prefix = tmp.path().join("p");
+    let mut bad = facts("/home/u/OneDrive\nExecStart=/bin/sh", &payload_dir(tmp.path()));
+    let planned = install(&bad, &Templates::default(), &good_observed(), &opts(&prefix));
+    refusal(&planned, "facts");
+
+    bad = facts("/home/u/OneDrive%u", &payload_dir(tmp.path()));
+    let planned2 = install(&bad, &Templates::default(), &good_observed(), &opts(&prefix));
+    refusal(&planned2, "facts");
+
+    bad = facts("/home/u/OneDrive", &payload_dir(tmp.path()));
+    bad.client_id = "bad id\nExecStart=/bin/sh".into();
+    let planned3 = install(&bad, &Templates::default(), &good_observed(), &opts(&prefix));
+    refusal(&planned3, "facts");
+}

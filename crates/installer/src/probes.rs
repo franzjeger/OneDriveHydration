@@ -523,11 +523,31 @@ pub fn fstab_entry(text: &str, mount: &Path) -> FstabEntry {
     FstabEntry::Absent
 }
 
+/// Encode whitespace, backslashes, and `#` using the octal escapes `/etc/fstab`
+/// and `/proc/self/mountinfo` expect (`\040`, `\011`, `\012`, `\134`, `\043`).
+/// Exact inverse of [`unescape`] on printable paths.
+pub fn escape_fstab(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            ' ' => out.push_str("\\040"),
+            '\t' => out.push_str("\\011"),
+            '\n' => out.push_str("\\012"),
+            '\\' => out.push_str("\\134"),
+            '#' => out.push_str("\\043"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Compose the fstab line this deployment needs, from the mount that is
 /// actually there. `noauto` is not optional and there is no code path that
 /// omits it; `nofail` keeps a missing disk from holding boot hostage.
 pub fn fstab_suggestion(row: &MountRow) -> String {
-    let what = stable_device_name(&row.source);
+    let what = escape_fstab(&stable_device_name(&row.source));
+    let where_point = escape_fstab(&row.point);
+    let fstype = escape_fstab(&row.fstype);
     let opts = match row.fstype.as_str() {
         "btrfs" => {
             let subvol = row
@@ -535,11 +555,11 @@ pub fn fstab_suggestion(row: &MountRow) -> String {
                 .split(',')
                 .find_map(|o| o.strip_prefix("subvol="))
                 .unwrap_or("/");
-            format!("subvol={subvol},noatime,noauto,nofail")
+            format!("subvol={},noatime,noauto,nofail", escape_fstab(subvol))
         }
         _ => "noauto,nofail".to_string(),
     };
-    format!("{what} {} {} {opts} 0 0", row.point, row.fstype)
+    format!("{what} {where_point} {fstype} {opts} 0 0")
 }
 
 /// Prefer `UUID=` over a device node that can be renumbered. Resolved by
