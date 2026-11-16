@@ -9,7 +9,6 @@
 
 use std::ffi::CString;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -105,6 +104,7 @@ pub fn support_from_release(release: Option<String>) -> KernelSupport {
 /// separate `SB_I_ALLOW_HSM` check against the mount table.
 pub fn kernel_precontent_support() -> KernelSupport {
     let release = uname_release();
+    // SAFETY: `fanotify_init` takes integer flags only and returns a descriptor or -1.
     let fd = unsafe {
         libc::fanotify_init(
             FAN_CLASS_PRE_CONTENT | FAN_CLOEXEC,
@@ -122,13 +122,9 @@ pub fn kernel_precontent_support() -> KernelSupport {
         };
     }
 
-    let probe = std::env::temp_dir().join(format!(
-        "onedrive-hydration-install-probe-{}",
-        std::process::id()
-    ));
-    let outcome = mark_probe_file(fd, &probe);
+    let outcome = mark_exclusive_probe_file(fd);
+    // SAFETY: `fd >= 0` is owned exclusively here and closed once.
     unsafe { libc::close(fd) };
-    let _ = std::fs::remove_file(&probe);
 
     let release_str = release.clone().unwrap_or_else(|| "unknown".into());
     match outcome {
@@ -152,29 +148,52 @@ pub fn kernel_precontent_support() -> KernelSupport {
     }
 }
 
-/// Mark the freshly created `probe` file and report what the kernel said.
-/// `Ok(None)` is acceptance; the mark is removed again immediately so nothing
-/// outlives the probe, not even until the `close()` two lines later.
-fn mark_probe_file(fd: libc::c_int, probe: &Path) -> Result<Option<io::Error>, String> {
-    std::fs::write(probe, b"")
-        .map_err(|e| format!("could not create probe file {}: {e}", probe.display()))?;
-    let c = CString::new(probe.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+/// Create an exclusive `0600` temp file via `mkstemp` (immune to `/tmp` symlink
+/// squatting), unlink its directory entry immediately, and test `FAN_PRE_ACCESS`
+/// directly against the open descriptor.
+fn mark_exclusive_probe_file(fd: libc::c_int) -> Result<Option<io::Error>, String> {
+    let mut tmpl = std::env::temp_dir()
+        .join("onedrive-hydration-probe-XXXXXX")
+        .into_os_string()
+        .into_encoded_bytes();
+    if tmpl.contains(&0) {
+        return Err("temp_dir contains an interior NUL".to_owned());
+    }
+    tmpl.push(0);
+    // SAFETY: `tmpl` is a mutable NUL-terminated buffer ending in `XXXXXX\0`.
+    let probe_fd = unsafe { libc::mkstemp(tmpl.as_mut_ptr() as *mut libc::c_char) };
+    if probe_fd < 0 {
+        return Err(format!(
+            "could not create exclusive probe file: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: `tmpl` now holds the created NUL-terminated path; unlink immediately
+    // while keeping `probe_fd` open so nothing lingers in `/tmp` even on crash.
+    unsafe { libc::unlink(tmpl.as_ptr() as *const libc::c_char) };
+
+    // SAFETY: Passing `(probe_fd, NULL)` marks the inode behind `probe_fd` directly.
     let rc = unsafe {
-        libc::fanotify_mark(fd, FAN_MARK_ADD, FAN_PRE_ACCESS, libc::AT_FDCWD, c.as_ptr())
+        libc::fanotify_mark(fd, FAN_MARK_ADD, FAN_PRE_ACCESS, probe_fd, std::ptr::null())
     };
-    if rc == 0 {
+    let result = if rc == 0 {
+        // SAFETY: Remove the test mark before closing `probe_fd`.
         unsafe {
             libc::fanotify_mark(
                 fd,
                 FAN_MARK_REMOVE,
                 FAN_PRE_ACCESS,
-                libc::AT_FDCWD,
-                c.as_ptr(),
+                probe_fd,
+                std::ptr::null(),
             )
         };
-        return Ok(None);
-    }
-    Ok(Some(io::Error::last_os_error()))
+        Ok(None)
+    } else {
+        Ok(Some(io::Error::last_os_error()))
+    };
+    // SAFETY: `probe_fd >= 0` is owned exclusively here.
+    unsafe { libc::close(probe_fd) };
+    result
 }
 
 /// One row of `/proc/self/mountinfo`, as far as the checks care.
@@ -218,11 +237,12 @@ pub fn parse_mountinfo(text: &str) -> Vec<MountRow> {
 }
 
 /// Octal escapes in `/proc/self/mountinfo` and fstab: space, tab, newline,
-/// backslash. Copied from HydrationAPI `selfcheck.rs` so the two sides read
-/// the same table the same way.
+/// backslash. Rebuilt byte-by-byte before UTF-8 decoding so non-ASCII mount
+/// paths (`/home/frank/Blåbær`) are preserved intact rather than turned into
+/// Latin-1 mojibake.
 pub fn unescape(s: &str) -> String {
     let b = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'\\' && i + 3 < b.len() {
@@ -230,26 +250,40 @@ pub fn unescape(s: &str) -> String {
                 .ok()
                 .and_then(|o| u8::from_str_radix(o, 8).ok())
             {
-                out.push(c as char);
+                out.push(c);
                 i += 4;
                 continue;
             }
         }
-        out.push(b[i] as char);
+        out.push(b[i]);
         i += 1;
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
-/// The row whose mount point is exactly `path`, or `None` — and `None` is the
+fn trim_mount_path(s: &str) -> &str {
+    if s == "/" {
+        "/"
+    } else {
+        let t = s.trim_end_matches('/');
+        if t.is_empty() {
+            "/"
+        } else {
+            t
+        }
+    }
+}
+
+/// The row whose mount point is `path`, or `None` — and `None` is the
 /// "directory, not a mount" refusal. Keyed by mount point rather than device
 /// on purpose: btrfs gives every subvolume its own anonymous `st_dev`, so a
 /// device comparison finds nothing, ever (measured in HydrationAPI's
 /// `exposure.rs`, where the same trap once made the warning silently never
 /// fire).
 pub fn find_mount<'a>(rows: &'a [MountRow], path: &Path) -> Option<&'a MountRow> {
-    let want = path.to_string_lossy();
-    rows.iter().find(|r| r.point == want)
+    let raw = path.to_string_lossy();
+    let want = trim_mount_path(&raw);
+    rows.iter().find(|r| trim_mount_path(&r.point) == want)
 }
 
 /// Whether `outer` contains `inner` as a path prefix.
@@ -503,14 +537,15 @@ pub enum FstabEntry {
 }
 
 pub fn fstab_entry(text: &str, mount: &Path) -> FstabEntry {
-    let want = mount.to_string_lossy();
+    let raw = mount.to_string_lossy();
+    let want = trim_mount_path(&raw);
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let f: Vec<&str> = line.split_whitespace().collect();
-        if f.len() < 4 || unescape(f[1]) != want {
+        if f.len() < 4 || trim_mount_path(&unescape(f[1])) != want {
             continue;
         }
         if f[3].split(',').any(|o| o == "noauto") {
@@ -660,5 +695,25 @@ pub fn binary_state(dir: &Path, name: &str) -> Result<(), String> {
             Err(format!("{}: not executable", p.display()))
         }
         Ok(_) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn utf8_and_trailing_slash_mounts_resolve_in_mountinfo_and_fstab() {
+        let table = "90 40 0:33 /@blåbær /home/u/Blåbær\\040OneDrive rw,noatime shared:3 - btrfs /dev/sda2 rw,subvol=/@blåbær\n";
+        let rows = parse_mountinfo(table);
+        let row = find_mount(&rows, Path::new("/home/u/Blåbær OneDrive/"))
+            .expect("UTF-8 mount with trailing slash must resolve");
+        assert_eq!(row.point, "/home/u/Blåbær OneDrive");
+
+        let fstab = fstab_suggestion(row);
+        assert_eq!(
+            fstab_entry(&fstab, Path::new("/home/u/Blåbær OneDrive/")),
+            FstabEntry::NoAuto
+        );
     }
 }

@@ -12,6 +12,19 @@ fn usage() -> ! {
     std::process::exit(2)
 }
 
+fn spawn_xdg_open(arg: &std::ffi::OsStr, label: &str) {
+    match std::process::Command::new("xdg-open").arg(arg).spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(e) => {
+            eprintln!("onedrive-hydration-tray: could not run xdg-open {label}: {e}");
+        }
+    }
+}
+
 fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
     let mut mount = None;
@@ -38,23 +51,12 @@ fn main() -> io::Result<()> {
         TrayOptions {
             mount,
             open: Box::new(|path| {
-                // Spawn and detach: the file manager belongs to the desktop,
-                // not to this process's lifetime. Failure is reported, not
-                // swallowed — "the click did nothing" must have a trace.
-                if let Err(e) = std::process::Command::new("xdg-open").arg(path).spawn() {
-                    eprintln!(
-                        "onedrive-hydration-tray: could not run xdg-open {}: {e}",
-                        path.display()
-                    );
-                }
+                // Spawn and reap on a helper thread so the tray never blocks
+                // and never accumulates `<defunct>` children.
+                spawn_xdg_open(path.as_os_str(), &path.display().to_string());
             }),
-            // The sign-in URL takes the same road as the folder: the browser
-            // belongs to the desktop, and xdg-open is how the desktop is
-            // asked for it.
             open_url: Box::new(|url| {
-                if let Err(e) = std::process::Command::new("xdg-open").arg(url).spawn() {
-                    eprintln!("onedrive-hydration-tray: could not run xdg-open {url}: {e}");
-                }
+                spawn_xdg_open(std::ffi::OsStr::new(url), url);
             }),
         },
     )

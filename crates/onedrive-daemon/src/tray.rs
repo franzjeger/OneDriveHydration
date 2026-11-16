@@ -1226,10 +1226,11 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
             if let Ok((text,)) = message.body().deserialize::<(String,)>() {
                 let desktop = DesktopStatus::parse(&text);
                 if pause_events.send(TrayEvent::Desktop(desktop)).is_err() {
-                    break;
+                    return;
                 }
             }
         }
+        let _ = pause_events.send(TrayEvent::BusLost);
     });
     let service_owner_changes = fdo
         .receive_name_owner_changed_with_args(&[(0, BUS_NAME)])
@@ -1477,6 +1478,7 @@ pub fn run(connection: zbus::blocking::Connection, options: TrayOptions) -> io::
                 // Nothing the service asserted survives it leaving the bus.
                 daemon_state = None;
                 credential = CredentialState::Unknown;
+                desktop = DesktopStatus::default();
                 apply_presentation(
                     &sni,
                     &menu,

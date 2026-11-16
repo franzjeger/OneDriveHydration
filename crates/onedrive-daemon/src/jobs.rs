@@ -4,7 +4,39 @@ use serde::Serialize;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
+
+/// Coalescing notification bell so D-Bus desktop/job state publishes immediately
+/// on job start, progress, cancellation, or control mutations rather than
+/// waiting out a 2-second poll timer.
+#[derive(Default)]
+pub struct Wakeup {
+    inner: (Mutex<bool>, Condvar),
+}
+
+impl Wakeup {
+    pub fn notify(&self) {
+        let (lock, cvar) = &self.inner;
+        let mut pending = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *pending = true;
+        cvar.notify_all();
+    }
+
+    pub fn wait_timeout(&self, timeout: Duration) {
+        let (lock, cvar) = &self.inner;
+        let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if *guard {
+            let mut g = guard;
+            *g = false;
+            return;
+        }
+        let (mut g, _) = cvar
+            .wait_timeout(guard, timeout)
+            .unwrap_or_else(|e| e.into_inner());
+        *g = false;
+    }
+}
 
 /// Metadata-only check before an operation can read or evict ambiguous bytes.
 pub fn check_issues(root: &Path, paths: &[String], state: &serde_json::Value) -> io::Result<()> {
@@ -21,8 +53,13 @@ pub fn check_issues(root: &Path, paths: &[String], state: &serde_json::Value) ->
             continue;
         };
         let path = root.join(relative);
-        if selected.iter().any(|selected| path.starts_with(selected)) {
-            return Err(io::Error::other(format!("{relative}: local data needs review before changing availability. See Needs attention in OneDrive.")));
+        if selected
+            .iter()
+            .any(|sel| path.starts_with(sel) || sel.starts_with(&path))
+        {
+            return Err(io::Error::other(format!(
+                "{relative}: local data needs review before changing availability. See Needs attention in OneDrive."
+            )));
         }
     }
     Ok(())
@@ -45,18 +82,51 @@ pub struct Job {
 pub struct Jobs {
     state: Mutex<Job>,
     cancel: AtomicBool,
+    wakeup: Arc<Wakeup>,
 }
 
+/// Remove entries whose ancestor directory is already in the sorted slice (`O(n)`).
+fn prune_descendants_sorted(sorted: &mut Vec<PathBuf>) {
+    let mut kept: Vec<PathBuf> = Vec::with_capacity(sorted.len());
+    for candidate in sorted.drain(..) {
+        if kept.last().is_some_and(|anc| candidate.starts_with(anc)) {
+            continue;
+        }
+        kept.push(candidate);
+    }
+    *sorted = kept;
+}
+
+const BUSY_EIO_REPLY: &str = "error: Input/output error (os error 5)";
+const BUSY_EIO_RETRIES: u32 = 5;
+
 impl Jobs {
+    pub fn with_wakeup(wakeup: Arc<Wakeup>) -> Self {
+        Self {
+            state: Mutex::new(Job::default()),
+            cancel: AtomicBool::new(false),
+            wakeup,
+        }
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, Job> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn is_running(&self) -> bool {
-        self.state.lock().unwrap().running
+        self.lock_state().running
     }
+
     pub fn snapshot(&self) -> String {
-        serde_json::to_string(&*self.state.lock().unwrap()).unwrap()
+        serde_json::to_string(&*self.lock_state()).unwrap_or_else(|_| "{}".to_owned())
     }
+
     pub fn cancel(&self) {
-        self.cancel.store(true, Ordering::SeqCst);
+        // Release pairs with worker Acquire loads on `self.cancel`.
+        self.cancel.store(true, Ordering::Release);
+        self.wakeup.notify();
     }
+
     pub fn start(
         self: &Arc<Self>,
         socket: PathBuf,
@@ -84,12 +154,9 @@ impl Jobs {
         }
         selected.sort();
         selected.dedup();
-        let all = selected.clone();
-        selected.retain(|p| {
-            !all.iter()
-                .any(|parent| p != parent && p.starts_with(parent))
-        });
-        let mut state = self.state.lock().unwrap();
+        prune_descendants_sorted(&mut selected);
+
+        let mut state = self.lock_state();
         if state.running {
             return Err(io::Error::other(
                 "An availability job is already running; finish or cancel it first",
@@ -102,25 +169,46 @@ impl Jobs {
             operation: operation.clone(),
             ..Job::default()
         };
-        self.cancel.store(false, Ordering::SeqCst);
+        // Release ensures worker thread sees `cancel == false` on start.
+        self.cancel.store(false, Ordering::Release);
         drop(state);
+        self.wakeup.notify();
+
         let jobs = Arc::clone(self);
         std::thread::spawn(move || {
             if let Err(e) = jobs.run(&socket, &root, selected, &operation) {
                 jobs.error(e.to_string());
             }
-            let mut state = jobs.state.lock().unwrap();
-            state.cancelled = jobs.cancel.load(Ordering::SeqCst);
+            let mut state = jobs.lock_state();
+            // Acquire pairs with `cancel()` Release store.
+            state.cancelled = jobs.cancel.load(Ordering::Acquire);
             state.running = false;
+            drop(state);
+            jobs.wakeup.notify();
         });
         Ok(())
     }
+
     fn error(&self, message: String) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         if state.errors.len() < 100 {
             state.errors.push(message);
         }
+        drop(state);
+        self.wakeup.notify();
     }
+
+    fn sleep_cancellable(&self, total: Duration) -> bool {
+        let deadline = std::time::Instant::now() + total;
+        while std::time::Instant::now() < deadline {
+            if self.cancel.load(Ordering::Acquire) {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        !self.cancel.load(Ordering::Acquire)
+    }
+
     fn run(
         &self,
         socket: &Path,
@@ -130,10 +218,13 @@ impl Jobs {
     ) -> io::Result<()> {
         let mut files = Vec::new();
         for path in selected {
-            if self.cancel.load(Ordering::SeqCst) {
+            if self.cancel.load(Ordering::Acquire) {
                 return Ok(());
             }
-            let relative = path.strip_prefix(root).unwrap().to_string_lossy();
+            let rel_path = path
+                .strip_prefix(root)
+                .map_err(|_| io::Error::other("Select items inside the OneDrive folder"))?;
+            let relative = rel_path.to_string_lossy();
             let command = format!(
                 "{} {relative}",
                 if operation == "keep" { "pin" } else { "unpin" }
@@ -173,25 +264,31 @@ impl Jobs {
         }
         files.sort();
         files.dedup();
-        self.state.lock().unwrap().total = files.len();
+        self.lock_state().total = files.len();
+        self.wakeup.notify();
+
         let ctl = std::env::current_exe()?.with_file_name("onedrive-hydrationctl");
         for path in files {
-            if self.cancel.load(Ordering::SeqCst) {
+            if self.cancel.load(Ordering::Acquire) {
                 break;
             }
-            let relative = path
-                .strip_prefix(root)
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
+            let Ok(rel_path) = path.strip_prefix(root) else {
+                self.error("Skipped item outside OneDrive root".to_owned());
+                self.lock_state().done += 1;
+                self.wakeup.notify();
+                continue;
+            };
+            let relative = rel_path.to_string_lossy().into_owned();
             if path.canonicalize().ok().as_ref() != Some(&path) || !path.is_file() {
                 self.error(format!(
                     "{relative}: file moved or was replaced; select it again"
                 ));
-                self.state.lock().unwrap().done += 1;
+                self.lock_state().done += 1;
+                self.wakeup.notify();
                 continue;
             }
-            self.state.lock().unwrap().current = relative.clone();
+            self.lock_state().current = relative.clone();
+            self.wakeup.notify();
             // Drawing or managing availability must not read resident files to
             // discover their state. This also avoids a whole-tree daemon scan
             // for every already-online-only item in a large folder.
@@ -200,40 +297,60 @@ impl Jobs {
                 let path = std::ffi::CString::new(path.as_os_str().as_bytes())
                     .map_err(io::Error::other)?;
                 let mark = c"user.hydration.dehydrated";
+                // SAFETY: `path` and `mark` are valid C strings; `(null, 0)` probes presence only.
                 let found = unsafe {
                     libc::lgetxattr(path.as_ptr(), mark.as_ptr(), std::ptr::null_mut(), 0)
                 };
                 if found < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::ENODATA) {
                     self.error(format!("{relative}: could not read availability metadata"));
-                    self.state.lock().unwrap().done += 1;
+                    self.lock_state().done += 1;
+                    self.wakeup.notify();
                     continue;
                 }
                 found >= 0
             };
             if (operation == "free" && dehydrated) || (operation == "keep" && !dehydrated) {
-                self.state.lock().unwrap().done += 1;
+                self.lock_state().done += 1;
+                self.wakeup.notify();
                 continue;
             }
-            let result = if operation == "free" {
-                control_request(socket, &format!("evict {relative}"))
+            let reply = if operation == "free" {
+                match control_request(socket, &format!("evict {relative}")) {
+                    Ok(r) => r,
+                    Err(e) => e.to_string(),
+                }
             } else {
-                std::process::Command::new(&ctl)
-                    .arg("hydrate")
-                    .arg(&path)
-                    .output()
-                    .map(|out| {
-                        String::from_utf8_lossy(if out.stdout.is_empty() {
-                            &out.stderr
-                        } else {
-                            &out.stdout
-                        })
-                        .trim()
-                        .to_owned()
-                    })
-            };
-            let reply = match result {
-                Ok(reply) => reply,
-                Err(error) => error.to_string(),
+                // Retry transient single-flight busy `EIO` (measured when another
+                // read is simultaneously hydrating on `hydrationd`), matching the
+                // standalone Dolphin wrapper behavior.
+                let mut attempt = 0u32;
+                loop {
+                    let out = std::process::Command::new(&ctl)
+                        .arg("hydrate")
+                        .arg(&path)
+                        .output()
+                        .map(|out| {
+                            String::from_utf8_lossy(if out.stdout.is_empty() {
+                                &out.stderr
+                            } else {
+                                &out.stdout
+                            })
+                            .trim()
+                            .to_owned()
+                        });
+                    let rendered = match out {
+                        Ok(r) => r,
+                        Err(e) => break e.to_string(),
+                    };
+                    if rendered == BUSY_EIO_REPLY && attempt < BUSY_EIO_RETRIES {
+                        attempt += 1;
+                        if !self.sleep_cancellable(Duration::from_secs(1)) {
+                            break rendered;
+                        }
+                        continue;
+                    }
+                    break rendered;
+                }
             };
             let prefix = if operation == "keep" {
                 "hydrated "
@@ -248,11 +365,12 @@ impl Jobs {
             if operation == "free" && reply.trim() == "kept: AlreadyDehydrated" {
                 // A concurrent eviction reached the same safe end state.
             } else if let Some(bytes) = bytes {
-                self.state.lock().unwrap().bytes += bytes;
+                self.lock_state().bytes += bytes;
             } else {
                 self.error(format!("{relative}: {reply}"));
             }
-            self.state.lock().unwrap().done += 1;
+            self.lock_state().done += 1;
+            self.wakeup.notify();
         }
         Ok(())
     }
@@ -261,7 +379,7 @@ impl Jobs {
 fn collect(directory: &Path, files: &mut Vec<PathBuf>, cancel: &AtomicBool) -> io::Result<()> {
     let mut dirs = vec![directory.to_owned()];
     while let Some(dir) = dirs.pop() {
-        if cancel.load(Ordering::SeqCst) {
+        if cancel.load(Ordering::Acquire) {
             return Ok(());
         }
         for entry in std::fs::read_dir(dir)? {
@@ -305,6 +423,16 @@ mod tests {
         let other = dir.join("other");
         std::fs::create_dir_all(&other).unwrap();
         assert!(super::check_issues(dir, &[other.to_string_lossy().into()], &state).is_ok());
+
+        // Selecting a file *inside* a folder-level availability issue must also be blocked.
+        let child_file = parent.join("sub.txt");
+        std::fs::write(&child_file, "x").unwrap();
+        let folder_issue =
+            serde_json::json!({"issues": [{"path": "docs", "kind": "availability"}]});
+        assert!(
+            super::check_issues(dir, &[child_file.to_string_lossy().into()], &folder_issue)
+                .is_err()
+        );
     }
 
     use super::*;

@@ -428,22 +428,29 @@ pub struct ControlSurface {
     enrollment_client_id: Option<String>,
     enrollment_busy: Arc<AtomicBool>,
     enrollment_status: Arc<Mutex<String>>,
+    wakeup: Arc<crate::jobs::Wakeup>,
 }
 
 impl ControlSurface {
     pub fn new(socket: PathBuf, require_uid: Option<u32>) -> Self {
+        let wakeup = Arc::new(crate::jobs::Wakeup::default());
         Self {
             socket,
             state: DaemonState::default(),
             desktop_state: "{}".into(),
-            jobs: Arc::new(crate::jobs::Jobs::default()),
+            jobs: Arc::new(crate::jobs::Jobs::with_wakeup(Arc::clone(&wakeup))),
             last_job: String::new(),
             credential: CredentialState::Unknown,
             require_uid,
             enrollment_client_id: None,
             enrollment_busy: Arc::new(AtomicBool::new(false)),
             enrollment_status: Arc::new(Mutex::new("idle".to_owned())),
+            wakeup,
         }
+    }
+
+    pub fn wakeup(&self) -> Arc<crate::jobs::Wakeup> {
+        Arc::clone(&self.wakeup)
     }
 
     /// Enable user-initiated browser enrollment. The caller, not this service,
@@ -481,7 +488,7 @@ impl ControlSurface {
         match credentials.unix_user_id() {
             Some(uid) if uid == required => Ok(()),
             Some(uid) => Err(Error::Denied(format!(
-                "eviction is owner-only: caller has uid {uid}, the daemon owner is {required}"
+                "control actions are owner-only: caller has uid {uid}, the daemon owner is {required}"
             ))),
             None => Err(Error::Denied(
                 "the bus did not report a uid for the caller".to_owned(),
@@ -551,6 +558,7 @@ impl ControlSurface {
         .await
         .map_err(|e| Error::Failed(e.to_string()))?;
         if reply.trim() == "resolution started" {
+            self.wakeup.notify();
             Ok(())
         } else {
             Err(Error::Failed(reply))
@@ -577,6 +585,7 @@ impl ControlSurface {
         .await
         .map_err(|e| Error::Failed(e.to_string()))?;
         if reply.trim() == "selection saved" {
+            self.wakeup.notify();
             Ok(())
         } else {
             Err(Error::Failed(reply))
@@ -590,9 +599,18 @@ impl ControlSurface {
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<Vec<String>, Error> {
         self.caller_permitted(&header, connection).await?;
+        if path.contains(['\n', '\r']) {
+            return Err(Error::InvalidPath(
+                "folder path cannot contain line breaks".to_owned(),
+            ));
+        }
         let socket = self.socket.clone();
         let reply = blocking::unblock(move || {
-            let cmd = format!("list_cloud {}", path.trim());
+            let cmd = if path.is_empty() {
+                "list_cloud".to_owned()
+            } else {
+                format!("list_cloud {path}")
+            };
             crate::control_request(&socket, &cmd)
         })
         .await
@@ -650,12 +668,14 @@ impl ControlSurface {
             .filter(|candidate| candidate.is_file())
             .unwrap_or_else(|| std::path::PathBuf::from("onedrive-hydrationctl"));
         std::thread::spawn(move || {
+            // `.status()` waits and reaps the child when the wizard window closes
+            // so repeated invocations never accumulate `<defunct>` zombies.
             let _ = std::process::Command::new(ctl_bin)
                 .arg("setup")
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .spawn();
+                .status();
         });
         Ok(())
     }
@@ -679,6 +699,7 @@ impl ControlSurface {
                 .await
                 .map_err(|e| Error::Failed(e.to_string()))?;
         if reply.trim() == "ok" {
+            self.wakeup.notify();
             Ok(())
         } else {
             Err(Error::Failed(reply))
@@ -696,6 +717,7 @@ impl ControlSurface {
             .await
             .map_err(|e| Error::Failed(e.to_string()))?;
         if reply.trim() == "ok" {
+            self.wakeup.notify();
             Ok(())
         } else {
             Err(Error::Failed(reply))

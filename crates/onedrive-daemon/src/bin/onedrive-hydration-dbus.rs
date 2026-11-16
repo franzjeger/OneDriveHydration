@@ -42,6 +42,7 @@ fn main() -> io::Result<()> {
     if let Some(client_id) = client_id {
         surface = surface.with_enrollment(client_id);
     }
+    let desktop_wakeup = surface.wakeup();
     let connection = zbus::blocking::connection::Builder::session()
         .and_then(|b| b.serve_at(OBJECT_PATH, surface))
         .and_then(|b| b.build())
@@ -89,7 +90,7 @@ fn main() -> io::Result<()> {
             if let Err(e) = publish_desktop(&desktop_iface, state.to_string()) {
                 eprintln!("onedrive-hydration-dbus: could not publish desktop state: {e}");
             }
-            std::thread::sleep(std::time::Duration::from_secs(2));
+            desktop_wakeup.wait_timeout(std::time::Duration::from_secs(2));
         });
     }
     // The daemon's second socket, derived the way the daemon derives it: the
