@@ -1,5 +1,11 @@
 /target
+.cargo/config.toml
 *.swp
+*.orig
+*.rej
+*.patch
+patch_*.diff
+strace.out*
 .DS_Store
 
 # Python bytecode from tools/, which is a scratch enrollment helper rather
