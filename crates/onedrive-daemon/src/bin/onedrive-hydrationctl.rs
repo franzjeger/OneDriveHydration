@@ -11,9 +11,58 @@ fn usage() -> ! {
          onedrive-hydrationctl [--socket <path>] pin <relative-path>\n  \
          onedrive-hydrationctl [--socket <path>] unpin <relative-path>\n  \
          onedrive-hydrationctl [--socket <path>] pending <relative-dir>\n  \
-         onedrive-hydrationctl hydrate <path>"
+         onedrive-hydrationctl hydrate <path>\n  \
+         onedrive-hydrationctl setup"
     );
     std::process::exit(2)
+}
+
+const PLASMOID_WIZARD_REL: &str =
+    "plasmoid/io.github.franzjeger.OneDriveHydration/contents/ui/SetupWizard.qml";
+
+fn setup_wizard_candidates(
+    exe: &std::path::Path,
+    xdg_data_home: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(data_home) = xdg_data_home {
+        out.push(
+            data_home
+                .join("plasma/plasmoids/io.github.franzjeger.OneDriveHydration/contents/ui/SetupWizard.qml"),
+        );
+    } else if let Some(h) = home {
+        out.push(
+            h.join(".local/share/plasma/plasmoids/io.github.franzjeger.OneDriveHydration/contents/ui/SetupWizard.qml"),
+        );
+    }
+    if let Some(bin_dir) = exe.parent() {
+        // Release tarball layout (`<prefix>/bin/onedrive-hydrationctl` ->
+        // `<prefix>/share/onedrive-hydration/packaging/...`).
+        out.push(
+            bin_dir
+                .join("../share/onedrive-hydration/packaging")
+                .join(PLASMOID_WIZARD_REL),
+        );
+        // Workspace build layout (`<repo>/target/{debug,release}/onedrive-hydrationctl` ->
+        // `<repo>/packaging/...`).
+        out.push(bin_dir.join("../../packaging").join(PLASMOID_WIZARD_REL));
+    }
+    out.push(
+        PathBuf::from("/usr/local/share/onedrive-hydration/packaging").join(PLASMOID_WIZARD_REL),
+    );
+    out.push(PathBuf::from("/usr/share/onedrive-hydration/packaging").join(PLASMOID_WIZARD_REL));
+    out
+}
+
+fn resolve_setup_wizard_qml(
+    exe: &std::path::Path,
+    xdg_data_home: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    setup_wizard_candidates(exe, xdg_data_home, home)
+        .into_iter()
+        .find(|p| p.is_file())
 }
 
 /// What the arguments asked for.
@@ -134,17 +183,28 @@ fn main() -> io::Result<()> {
     };
 
     if is_setup {
-        // Fallback to source directory if not installed in /usr/share
-        let script = if std::path::Path::new("/usr/share/onedrive-hydration/ui/SetupWizard.qml")
-            .exists()
-        {
-            "/usr/share/onedrive-hydration/ui/SetupWizard.qml".to_string()
-        } else {
-            // For dev
-            let exe = std::env::current_exe()?;
-            exe.parent().unwrap().join("../../../../packaging/plasmoid/io.github.franzjeger.OneDriveHydration/contents/ui/SetupWizard.qml").to_string_lossy().into_owned()
+        let exe = std::env::current_exe()?;
+        let xdg = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let Some(script) = resolve_setup_wizard_qml(&exe, xdg.as_deref(), home.as_deref()) else {
+            eprintln!(
+                "error: SetupWizard.qml could not be found under installed plasmoid or packaging paths"
+            );
+            std::process::exit(1);
         };
-        let status = std::process::Command::new("qml6").arg(&script).status()?;
+        let qml_runner = ["/usr/lib/qt6/bin/qml", "qml6"]
+            .into_iter()
+            .find(|bin| {
+                std::path::Path::new(bin).is_file()
+                    || std::process::Command::new(bin)
+                        .arg("--version")
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .is_ok()
+            })
+            .unwrap_or("qml6");
+        let status = std::process::Command::new(qml_runner).arg(&script).status()?;
         std::process::exit(status.code().unwrap_or(1));
     }
 
@@ -238,5 +298,35 @@ mod tests {
         let out = hydrate(p.to_str().unwrap()).unwrap();
         assert_eq!(out, 0, "a fully-resident file should report no new disk");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn setup_wizard_resolves_workspace_and_release_layouts() {
+        let tmp = std::env::temp_dir().join(format!("kod-setup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // 1. Release prefix layout: <prefix>/bin/onedrive-hydrationctl
+        let prefix = tmp.join("rel");
+        let rel_exe = prefix.join("bin/onedrive-hydrationctl");
+        let rel_qml = prefix
+            .join("share/onedrive-hydration/packaging")
+            .join(PLASMOID_WIZARD_REL);
+        std::fs::create_dir_all(rel_exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(rel_qml.parent().unwrap()).unwrap();
+        std::fs::write(&rel_exe, "").unwrap();
+        std::fs::write(&rel_qml, "Item {}\n").unwrap();
+        assert!(resolve_setup_wizard_qml(&rel_exe, None, None).is_some());
+
+        // 2. Cargo workspace layout: <repo>/target/debug/onedrive-hydrationctl
+        let repo = tmp.join("repo");
+        let dev_exe = repo.join("target/debug/onedrive-hydrationctl");
+        let dev_qml = repo.join("packaging").join(PLASMOID_WIZARD_REL);
+        std::fs::create_dir_all(dev_exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(dev_qml.parent().unwrap()).unwrap();
+        std::fs::write(&dev_exe, "").unwrap();
+        std::fs::write(&dev_qml, "Item {}\n").unwrap();
+        assert!(resolve_setup_wizard_qml(&dev_exe, None, None).is_some());
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

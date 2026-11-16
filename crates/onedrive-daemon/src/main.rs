@@ -18,7 +18,10 @@ enum AuthFlow {
 
 enum Command {
     Auth { force: bool, flow: AuthFlow },
-    Run { mount: PathBuf },
+    Run {
+        mount: PathBuf,
+        quota_bytes: Option<u64>,
+    },
 }
 
 struct Args {
@@ -77,9 +80,22 @@ fn parse() -> Args {
     let command = match std::env::args().nth(1).as_deref() {
         Some("auth") => Command::Auth { force: false, flow },
         Some("reauth") => Command::Auth { force: true, flow },
-        Some("run") => Command::Run {
-            mount: PathBuf::from(required("--mount")),
-        },
+        Some("run") => {
+            let quota_bytes = match value("--quota-gb") {
+                Some(raw_gb) => match parse_quota_gb(&raw_gb) {
+                    Ok(bytes) => Some(bytes),
+                    Err(err) => {
+                        eprintln!("onedrive-hydration-daemon: {err}");
+                        usage();
+                    }
+                },
+                None => None,
+            };
+            Command::Run {
+                mount: PathBuf::from(required("--mount")),
+                quota_bytes,
+            }
+        }
         _ => usage(),
     };
     let state_dir = PathBuf::from(required("--state-dir"));
@@ -97,6 +113,17 @@ fn parse() -> Args {
         client_id: required("--client-id"),
         socket,
     }
+}
+
+fn parse_quota_gb(raw: &str) -> Result<u64, String> {
+    let gb = raw
+        .parse::<u64>()
+        .map_err(|_| format!("invalid --quota-gb value {raw:?}: expected a positive integer"))?;
+    if gb == 0 {
+        return Err("--quota-gb must be greater than 0".to_owned());
+    }
+    gb.checked_mul(1024 * 1024 * 1024)
+        .ok_or_else(|| format!("--quota-gb value {gb} overflows byte range"))
 }
 
 fn validate_cli(args: &[String]) -> Result<(), String> {
@@ -128,6 +155,9 @@ fn validate_cli(args: &[String]) -> Result<(), String> {
         if values.contains(&argument) {
             if index + 1 >= args.len() || args[index + 1].starts_with("--") {
                 return Err(format!("missing value for {argument}"));
+            }
+            if argument == "--quota-gb" {
+                parse_quota_gb(&args[index + 1])?;
             }
             index += 2;
         } else if switches.contains(&argument) {
@@ -220,7 +250,7 @@ fn main() -> io::Result<()> {
             }
             Ok(())
         }
-        Command::Run { mount } => {
+        Command::Run { mount, quota_bytes } => {
             if !mount.is_dir() {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
@@ -333,14 +363,12 @@ fn main() -> io::Result<()> {
                     // Off unless `--autoevict` or `--quota-gb` is passed: auto-freeing local
                     // space is opt-in.
                     eviction: {
-                        let quota = value("--quota-gb").and_then(|s| s.parse::<u64>().ok());
-                        if flag("--autoevict") || quota.is_some() {
+                        if flag("--autoevict") || quota_bytes.is_some() {
                             let mut cfg =
                                 hydration_client::evict_policy::EvictionConfig::default_pressure();
-                            if let Some(gb) = quota {
-                                let bytes = gb * 1024 * 1024 * 1024;
+                            if let Some(bytes) = quota_bytes {
                                 cfg.quota_bytes = Some(bytes);
-                                cfg.quota_target_bytes = Some(bytes * 9 / 10);
+                                cfg.quota_target_bytes = Some(bytes / 10 * 9);
                             }
                             Some(cfg)
                         } else {
@@ -384,5 +412,8 @@ mod argument_tests {
         assert!(validate_cli(&args(&["auth", "--mystery"])).is_err());
         assert!(validate_cli(&args(&["run", "--mount", "/one", "--mount", "/two"])).is_err());
         assert!(validate_cli(&args(&["auth", "--client-id"])).is_err());
+        assert!(validate_cli(&args(&["run", "--quota-gb", "0"])).is_err());
+        assert!(validate_cli(&args(&["run", "--quota-gb", "not-a-number"])).is_err());
+        assert!(validate_cli(&args(&["run", "--quota-gb", "50"])).is_ok());
     }
 }

@@ -644,8 +644,13 @@ impl ControlSurface {
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<(), Error> {
         self.caller_permitted(&header, connection).await?;
-        std::thread::spawn(|| {
-            let _ = std::process::Command::new("onedrive-hydrationctl")
+        let ctl_bin = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("onedrive-hydrationctl")))
+            .filter(|candidate| candidate.is_file())
+            .unwrap_or_else(|| std::path::PathBuf::from("onedrive-hydrationctl"));
+        std::thread::spawn(move || {
+            let _ = std::process::Command::new(ctl_bin)
                 .arg("setup")
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())

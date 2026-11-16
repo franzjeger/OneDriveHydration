@@ -266,3 +266,28 @@ fn the_mount_is_configuration_not_a_guess() {
     let qml = read("contents/ui/main.qml");
     assert!(qml.contains("Plasmoid.configuration.mountPath"));
 }
+
+#[test]
+fn setup_wizard_speaks_the_exact_dbus_vocabulary() {
+    let wizard = read("contents/ui/SetupWizard.qml");
+    assert!(wizard.contains(BUS_NAME));
+    assert!(wizard.contains(OBJECT_PATH));
+    assert!(wizard.contains("props.CredentialState"));
+    assert!(!wizard.contains("\"credentialState\""));
+    assert!(wizard.contains("\"healthy\""));
+    assert!(!wizard.contains("=== \"Healthy\""));
+    assert!(wizard.contains("\"BeginEnrollment\""));
+    assert!(wizard.contains("\"EnrollmentStatus\""));
+    assert!(wizard.contains("\"ListCloudFolders\""));
+    assert!(wizard.contains("\"SetFolderSelection\""));
+    assert!(
+        !wizard.contains("itemAtIndex("),
+        "ListView recycles delegates on scroll; selection state must not read itemAtIndex"
+    );
+
+    let full = read("contents/ui/FullRepresentation.qml");
+    assert!(
+        full.contains("onClicked: full.host.beginEnrollment()"),
+        "primary Sign in button must retain direct in-flyout PKCE enrollment"
+    );
+}

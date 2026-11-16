@@ -51,6 +51,8 @@ TestCase {
         property bool enrollmentBusy: false
         property string enrollmentResult: ""
         property bool enrollmentFailed: false
+        property int enrollmentCalls: 0
+        property int wizardCalls: 0
         property string evictResult: ""
         property bool evictFailed: false
         property bool evictBusy: false
@@ -62,7 +64,8 @@ TestCase {
         readonly property bool working: activityVisible && (downloading > 0 || indexing || activeUploads.length > 0)
         readonly property var presentation: Status.present(model)
         function count(n, singular, plural) { return Status.count(n, singular, plural); }
-        function beginEnrollment() {}
+        function beginEnrollment() { enrollmentCalls += 1; }
+        function openSetupWizard() { wizardCalls += 1; }
         function openMount() {}
         function configure() {}
         function openContainingFolder(relative) {}
@@ -93,6 +96,8 @@ TestCase {
         model.activeUploads = [];
         model.credentialState = "healthy";
         model.enrollmentResult = "";
+        model.enrollmentCalls = 0;
+        model.wizardCalls = 0;
         model.evictResult = "";
         model.recentActivity = [];
         panel.detailsExpanded = false;
@@ -206,7 +211,7 @@ TestCase {
         compare(model.presentation.headline, "Pausing after current work");
         mouseClick(pause);
         compare(model.paused, false);
-        compare(Status.bytes(1024), "1.0 KiB");
+        compare(Status.bytes(1024), "1" + Qt.locale().decimalPoint + "0 KiB");
     }
     function test_footer_survives_long_content() {
         testCase.width = 360;
@@ -268,5 +273,86 @@ TestCase {
         compare(settings.title, "OneDrive settings");
         compare(settings.cfg_mountPath, "/tmp/OneDrive");
         settings.destroy();
+    }
+
+    function test_signin_button_runs_direct_enrollment_and_wizard_is_separate() {
+        model.credentialState = "rejected";
+        wait(50);
+        const signIn = findChild(panel, "signInButton");
+        const guided = findChild(panel, "guidedSetupButton");
+        verify(signIn !== null && signIn.visible);
+        verify(guided !== null && guided.visible);
+        signIn.clicked();
+        compare(model.enrollmentCalls, 1);
+        compare(model.wizardCalls, 0);
+        guided.clicked();
+        compare(model.wizardCalls, 1);
+    }
+
+    function test_setup_wizard_handles_dbus_replies_scrolling_and_async_save() {
+        const component = Qt.createComponent("../io.github.franzjeger.OneDriveHydration/contents/ui/SetupWizard.qml");
+        compare(component.status, Component.Ready, component.errorString());
+
+        let openedUrls = [];
+        let closedCount = 0;
+        let savedPayload = null;
+        let pendingSaveSuccess = null;
+        const manyFolders = [];
+        for (let i = 0; i < 60; i++) {
+            manyFolders.push("Folder_" + (i < 10 ? "0" + i : i));
+        }
+
+        const wizard = component.createObject(null, {
+            visible: false,
+            autoFetchOnStart: false,
+            openExternalUrl: function(url) { openedUrls.push(url); return true; },
+            closeWindow: function() { closedCount += 1; },
+            callDbus: function(spec, onSuccess, onError) {
+                if (spec.member === "GetAll") {
+                    onSuccess({value: {CredentialState: {value: "rejected"}, DesktopState: "{\"selection\":[\"Folder_55\"]}"}});
+                } else if (spec.member === "BeginEnrollment") {
+                    onSuccess({value: "https://login.microsoftonline.com/oauth2/v2.0/authorize?client_id=test"});
+                } else if (spec.member === "EnrollmentStatus") {
+                    onSuccess({value: "complete"});
+                } else if (spec.member === "ListCloudFolders") {
+                    onSuccess({value: manyFolders});
+                } else if (spec.member === "SetFolderSelection") {
+                    savedPayload = spec.arguments[0];
+                    pendingSaveSuccess = onSuccess;
+                }
+            }
+        });
+        verify(wizard !== null);
+
+        wizard.fetchState();
+        compare(wizard.credentialState, "rejected");
+        compare(wizard.folderSelectionPushed, false);
+        // Existing selection from DesktopState was pre-populated without leading slash.
+        verify(wizard.isFolderExcluded("Folder_55"));
+
+        wizard.beginEnrollment();
+        compare(openedUrls.length, 1);
+        verify(openedUrls[0].indexOf("https://login.microsoftonline.com/") === 0);
+
+        wizard.pollEnrollmentStatus();
+        compare(wizard.credentialState, "healthy");
+        compare(wizard.folderSelectionPushed, true);
+        compare(wizard.cloudFolders.length, 60);
+
+        // Toggle item 0 and off-screen item 42, verify scrolling never loses state
+        // and paths never start with '/'.
+        wizard.toggleExcluded("Folder_00", true);
+        wizard.toggleExcluded("/Folder_42", true);
+        compare(JSON.stringify(wizard.selectedExclusions()), JSON.stringify(["Folder_00", "Folder_42", "Folder_55"]));
+
+        // finishSetup must wait for async SetFolderSelection completion before closing!
+        wizard.finishSetup();
+        compare(closedCount, 0, "wizard must not close before SetFolderSelection replies");
+        compare(JSON.stringify(savedPayload), JSON.stringify(["Folder_00", "Folder_42", "Folder_55"]));
+        verify(pendingSaveSuccess !== null);
+        pendingSaveSuccess({});
+        compare(closedCount, 1, "wizard closes after SetFolderSelection succeeds");
+
+        wizard.destroy();
     }
 }

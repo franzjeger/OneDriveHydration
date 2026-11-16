@@ -84,13 +84,23 @@ ColumnLayout {
                         wrapMode: Text.Wrap
                         Layout.fillWidth: true
                     }
-                    PlasmaComponents3.Button {
-                        objectName: "signInButton"
+                    RowLayout {
                         visible: full.host.activityVisible && full.host.credentialState === "rejected"
-                        enabled: !full.host.enrollmentBusy
-                        text: full.host.enrollmentBusy ? "Waiting for browser…" : "Sign in"
-                        icon.name: "system-log-in"
-                        onClicked: full.host.openSetupWizard()
+                        spacing: Kirigami.Units.smallSpacing
+                        PlasmaComponents3.Button {
+                            objectName: "signInButton"
+                            enabled: !full.host.enrollmentBusy
+                            text: full.host.enrollmentBusy ? "Waiting for browser…" : "Sign in"
+                            icon.name: "system-log-in"
+                            onClicked: full.host.beginEnrollment()
+                        }
+                        PlasmaComponents3.Button {
+                            objectName: "guidedSetupButton"
+                            enabled: !full.host.enrollmentBusy
+                            text: "Guided setup…"
+                            icon.name: "tools-wizard"
+                            onClicked: full.host.openSetupWizard()
+                        }
                     }
                 }
             }
